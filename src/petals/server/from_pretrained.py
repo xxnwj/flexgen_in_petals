@@ -37,7 +37,7 @@ from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTens
 from petals.flexgen_utils.utils import ValueHolder, array_1d
 import numpy as np
 # import pdb
-
+DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
 logger = get_logger(__name__)
 
 
@@ -47,6 +47,7 @@ def load_pretrained_block(
     env: ExecutionEnv,
     policy: Policy,
     weight_home: array_1d,
+    path: str,
     *,
     config: Optional[PretrainedConfig] = None,
     torch_dtype: Union[torch.dtype, str] = "auto",
@@ -64,10 +65,12 @@ def load_pretrained_block(
 
     assert torch_dtype in DTYPE_MAP.values(), f"torch_dtype must be one of {list(DTYPE_MAP.values())}"
     torch_dtype = resolve_block_dtype(config, torch_dtype)
-
+    # import pdb; pdb.set_trace()
     with init_empty_weights(): #init weights
         print('load_pretrained_block : init_empty_weights() ') 
-        block = get_model_block(config, env, policy, weight_home, layer_idx=block_index)
+        block = get_model_block(config, env, policy, weight_home, path, layer_idx=block_index)
+        print('block ', block)
+        # import pdb; pdb.set_trace()
     # print('server from_pretrained.py:load_pretrained_block() after get_model_block  block', block)
     #### currently, the block does not contain weights yet
     block_prefix = f"{config.block_prefix}.{block_index}." # block prefix is the transformer layer_idx
@@ -80,7 +83,7 @@ def load_pretrained_block(
         max_disk_space=max_disk_space,
     )
     # state_dict contains weights tensors
-    init_weight_list(state_dict, policy, env, block)
+    # init_weight_list(state_dict, policy, env, block)
     # for param_name, _ in block.named_parameters():
     #     assert param_name in state_dict, f"{param_name} not in state dict"
     #     param = state_dict[param_name]
@@ -262,7 +265,8 @@ def _load_state_dict_from_local_file(path: str, *, block_prefix: Optional[str] =
 def init_weight_list(state_dict, policy, env, block):
     dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
     dev_choices = [env.disk, env.cpu, env.gpu]
-
+    print('block')
+    # import pdb; pdb.set_trace()
     sizes=[]
     for param_name, _ in block.named_parameters():
         assert param_name in state_dict, f"{param_name} not in state dict"
@@ -301,12 +305,12 @@ def init_weight_list(state_dict, policy, env, block):
         if not compress:
             weight = home.allocate(shape, dtype, pin_memory=pin_memory)
             weight.load_from_state_dict(param) ###############
-            # print('weight.shape ', weight.shape)
-            # if DUMMY_WEIGHT not in filename:
-            #     weight.load_from_np_file(weight_specs[i][2])
-            # else:
-            #     weight.load_from_np(np.ones(shape, dtype))
-            #     #weight.load_from_np(np.random.rand(*shape).astype(dtype))
+            print('weight.shape ', weight.shape)
+            if DUMMY_WEIGHT not in filename:
+                weight.load_from_np_file(weight_specs[i][2])
+            else:
+                weight.load_from_np(np.ones(shape, dtype))
+                #weight.load_from_np(np.random.rand(*shape).astype(dtype))
         else: # compress
             weight = home.compressed_device.allocate(
                 shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
@@ -314,14 +318,14 @@ def init_weight_list(state_dict, policy, env, block):
             if DUMMY_WEIGHT not in filename:
                 # weight.load_from_np_file(weight_specs[i][2])
                 weight.load_from_state_dict(param)
-        #     else:
-        #         for i in range(2):
-        #             x = weight.data[i]
-        #             x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
+            else:
+                for i in range(2):
+                    x = weight.data[i]
+                    x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
         i+=1
-        # ret.append(weight)
+        ret.append(weight)
         # set_module_tensor_to_device(block, param_name, weight.device.dev, weight, value=param, dtype=param.dtype)
-        set_module_tensor_to_device(block, param_name, "cpu", weight, value=param, dtype=param.dtype)
+        # set_module_tensor_to_device(block, param_name, "cpu", weight, value=param, dtype=param.dtype)
         
         # block._parameters[tmp_name]= weight.data
         

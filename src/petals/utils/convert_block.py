@@ -49,9 +49,11 @@ def convert_block(
     """
     if freeze:
         block.requires_grad_(False)
-
+    # print()
+    # import pdb; pdb.set_trace()
+    # print()
     block = make_tensor_parallel(block, config, tensor_parallel_devices, output_device=output_device)
-
+    import pdb; pdb.set_trace()
     if quant_type != QuantType.NONE:
         block = quantize_module(block, quant_type=quant_type)
 
@@ -129,10 +131,13 @@ def make_tensor_parallel(
             logger.warning("Tensor parallelism is not tested for models other than BLOOM yet, proceed with caution")
         tp_config = None
     tp_block = tp.TensorParallel(block, devices, config=tp_config, output_device=output_device, delay_init=True)
-    # print('make_tensor_parallel: tp_block ', tp_block)
+    print('make_tensor_parallel: tp_block ', tp_block)
+    # import pdb; pdb.set_trace()
     total_heads = 0
     for tp_shard in tp_block.module_shards:
         for submodule in tp_shard.modules():
+            # print("flex_llama.LlamaAttention ", flex_llama.LlamaAttention)
+            # print("submodule ", submodule)
             if isinstance(submodule, model_config.attn_class):
                 total_heads += submodule.num_heads
     assert total_heads == model_config.num_attention_heads

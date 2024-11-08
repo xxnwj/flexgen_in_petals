@@ -253,6 +253,7 @@ class Server:
                         num_bits=4, group_size=64,
                         group_dim=2, symmetric=False))
         self.weight_home = array_1d(self.num_blocks, ValueHolder)
+        self.path = '/tmp/data/llama_weights'
         ##############################################################
         
         
@@ -365,6 +366,7 @@ class Server:
                 env=self.env, #####
                 policy=self.policy, #####
                 weight_home= self.weight_home, #####
+                path=self.path, ######
                 attn_cache_bytes=self.attn_cache_bytes,
                 server_info=self.server_info,
                 model_info=self.model_info,
@@ -475,6 +477,7 @@ class ModuleContainer(threading.Thread):
         env: ExecutionEnv, ####
         policy: Policy,    ####
         weight_home: array_1d, ####
+        path: str,
         attn_cache_bytes: int,
         server_info: ServerInfo,
         model_info: ModelInfo,
@@ -527,7 +530,8 @@ class ModuleContainer(threading.Thread):
                     block_index,
                     env, #######
                     policy, #######
-                    weight_home, ######
+                    weight_home, ######,
+                    path, ########
                     config=block_config,
                     torch_dtype=torch_dtype,
                     revision=revision,
@@ -535,7 +539,8 @@ class ModuleContainer(threading.Thread):
                     cache_dir=cache_dir,
                     max_disk_space=max_disk_space,
                 )
-                # print('block nn.module() before convert_block() ', block )
+                print('block nn.module() before convert_block() ', block )
+                print('block_config' , block_config)
                 block = convert_block(
                     block,     ## block configuration
                     block_index,

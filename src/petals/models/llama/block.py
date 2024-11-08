@@ -11,14 +11,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 from transformers.models.llama.modeling_llama import (
-    LlamaAttention,
+    # LlamaAttention,
     LlamaConfig,
-    LlamaDecoderLayer,
-    LlamaMLP,
+    # LlamaDecoderLayer,
+    # LlamaMLP,
     LlamaRMSNorm,
     repeat_kv,
     rotate_half,
 )
+
+
+
 
 from petals.utils.cuda_graphs import make_inference_graphed_callable
 # from petals.flexgen_utils.utils import ExecutionEnv
@@ -26,7 +29,11 @@ from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
 from petals.flexgen_utils.pytorch_backend import fix_recursive_import
-from petals.flexgen_utils.utils import ValueHolder, array_1d
+from petals.flexgen_utils.utils import ValueHolder, array_1d, array_2d
+from petals.models.llama.flex_llama import FLEX_LlamaAttention, FLEX_LlamaMLP, LlamaDecoderLayer
+from petals.models.llama.llama_config import get_llama_config
+import os
+
 fix_recursive_import()
 
 
@@ -81,49 +88,47 @@ def init_weight_list(weight_specs, policy, env):
     
 
 
+class LlamaRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        """
+        LlamaRMSNorm is equivalent to T5LayerNorm
+        """
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
 
-class LlamaMLP_env(LlamaMLP):
-    def __init__(self,*args,config: LlamaConfig, env: ExecutionEnv,policy: Policy,layer_id: int,**kwargs):
-        super().__init__(*args, config=config, **kwargs)
-        self.config = config
-        self.env = env
-        self.layer_id = layer_id
-        self.policy = policy
-        self.compute = self.env.gpu
-        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-                                else self.compute)
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
 
-        self.task = None
-
-
-
-
-
-
-
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
 
 
 
-
-class OptimizedLlamaAttention(LlamaAttention):
-    # def __init__(self, *args,  **kwargs):
-    def __init__(self, *args, env, policy, layer_id, **kwargs):
-        super().__init__(*args, **kwargs)
+class OptimizedLlamaAttention(FLEX_LlamaAttention):
+    def __init__(self, *args,  **kwargs):
+        super().__init__(*args,  **kwargs)
+    # def __init__(self, *args, env, policy, layer_id, **kwargs):
+    #     super().__init__(*args, env, policy, layer_id, **kwargs)
         self._rotary_graph = None
         
-        self.env = env
-        self.layer_id = layer_id
-        self.policy = policy
-        self.compute = self.env.gpu
+        # self.env = env
+        # self.layer_id = layer_id
+        # self.policy = policy
+        # self.compute = self.env.gpu
 
-        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-                                else self.compute)
-        self.attention_compute = (self.env.cpu if self.policy.cpu_cache_compute
-                                  else self.env.gpu)
+        # self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
+        #                         else self.compute)
+        # self.attention_compute = (self.env.cpu if self.policy.cpu_cache_compute
+        #                           else self.env.gpu)
         
-        self.task = None
+        # self.task = None
         
         
         
@@ -223,45 +228,89 @@ class OptimizedLlamaAttention(LlamaAttention):
 
 
 class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py return config.block_class(config)
-    def __init__(self, config: LlamaConfig,layer_id: int, env: ExecutionEnv, policy: Policy, weight_home: array_1d):
+    def __init__(self, config: LlamaConfig,layer_id: int, env: ExecutionEnv, policy: Policy, weight_home: array_1d, path: str, ):
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
         self.layer_id = layer_id
-        
+        print('OptimizedLlamaDecoderLayer config ', config)
+        self.config = config
+        self.num_heads = config.num_attention_heads
         # self.self_attn = OptimizedLlamaAttention(config=config, layer_idx=0)
         # self.mlp = LlamaMLP(config=config)
         ########---------------------------------------------
-        self.self_attn = OptimizedLlamaAttention(config=config, env=env, policy=policy, layer_id=self.layer_id ,layer_idx=0)
+        self.self_attn = OptimizedLlamaAttention(config=config, env=env, policy=policy, layer_id=self.layer_id )
         #layer_idx only matters for KV caching, and we re-implement it in Petals
-        self.mlp = LlamaMLP_env(config=config, env=env, policy=policy,layer_id=self.layer_id )
+        self.mlp = FLEX_LlamaMLP(config=config, env=env, policy=policy,layer_id=self.layer_id )
          ########---------------------------------------------
-        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.pre_attn_graph = None
         self.post_attn_graph = None
         
-        self.compute = self.self_attn.compute
-        self.policy = policy
+        
+        
+        self.llama_config = get_llama_config('huggyllama/llama-7b')
         self.env = env
+        self.path = path
+        self.policy = policy
+        self.num_gpu_batches = policy.num_gpu_batches
+        layers = []
+        layers.append(self.self_attn)
+        layers.append(self.mlp)
+        # layers.append(self.input_layernorm)
+        # layers.append(self.post_attention_layernorm)
         
+        self.layers = layers
+        self.num_layers = len(layers)
         # print('block.py, class OptimizedLlamaDecoderLayer(LlamaDecoderLayer): self.mlp ', self.mlp)
-        dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
-        dev_choices = [env.disk, env.cpu, env.gpu]
-        # for param in self.mlp.parameters():  
-        #     print('mlp parameter ', param.size())  
-        # attention_weight_specs=self.self_attn.get_weights()
-        # mlp_weight_specs=self.mlp.get_weights()
-        # sizes = [np.prod(spec[0]) for spec in attention_weight_specs]
+        # dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
+        # dev_choices = [env.disk, env.cpu, env.gpu]
         
-        # home1, home2 = ValueHolder(), ValueHolder()
-        # home1.store(self.self_attn.weight)
-        # home1.store(self.mlp.weight)
-        # weight_home.store((home1, home2))
-        
-        
-        
+        if self.policy.act_gpu_percent == 100:
+            self.act_home = self.env.gpu
+        elif self.policy.act_cpu_percent == 100:
+            self.act_home = self.env.cpu
+        elif self.policy.act_disk_percent == 100:
+            self.act_home = self.env.disk
+        else:
+            raise NotImplementedError()
 
+        # CUDA streams
+        self.load_weight_stream = torch.cuda.Stream()
+        self.load_cache_stream = torch.cuda.Stream()
+        self.store_cache_stream = torch.cuda.Stream()
+        
+        num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
+        # cache[j][k]
+        self.cache_home = array_2d(num_layers, num_gpu_batches, ValueHolder)
+        self.cache_read_buf = array_2d(num_layers, num_gpu_batches, ValueHolder)
+        self.cache_write_buf = array_2d(num_layers, num_gpu_batches, ValueHolder)
+        # weight[j]
+        self.weight_read_buf = array_1d(num_layers, ValueHolder)
+        # attention_mask[k]
+        self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
+
+        self.task = None
+        print('before init_all_weights OptimizedLlamaDecoderLayer self.config', self.config)
+        # Initialize weights and apply final processing
+        self.init_all_weights()
+        print('OptimizedLlamaDecoderLayer self.config', self.config)
+        
+    def init_all_weights(self):
+        self.weight_home = array_1d(self.num_layers, ValueHolder)
+        for j in range(self.num_layers):
+            self.init_weight(j)
+            
+    def init_weight(self, j):
+        print('self.llama_config ', self.llama_config)
+        expanded_path = os.path.abspath(os.path.expanduser(
+            os.path.join(self.path, f"{self.llama_config.name}-np")))
+        check_path = os.path.join(expanded_path, "embed_tokens.weight")
+        if not os.path.exists(check_path) and DUMMY_WEIGHT not in check_path:
+            download_llama_weights(self.llama_config.name, self.path)
+        self.layers[j].init_weight(self.weight_home[j], expanded_path)
+        
     def _optimized_input_layernorm(self, hidden_states):
         if self.pre_attn_graph is None:
             self.pre_attn_graph = make_inference_graphed_callable(
@@ -424,3 +473,178 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
         key_states = key_states.view(*value_states.shape)
         key_states = key_states.permute(0, 2, 1)
         return (key_states, value_states)
+
+
+###############################################################################################
+    def load_weight(self, i, j, k, overlap=True):
+        # Handle corner cases
+        if j == self.num_layers:
+            j = 0
+            i += 1
+            if i == self.execute_gen_len:
+                return
+        # Load from weight_home to weight_read_buf
+        if overlap:
+            with torch.cuda.stream(self.load_weight_stream):
+                self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+        else:
+            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+
+    def delete_weight(self, j, k):
+        if k == 0:
+            for x in self.weight_home[j].pop():
+                if isinstance(x, ValueHolder):
+                    for y in x.pop():
+                        y.delete()
+                else:
+                    x.delete()
+
+    def init_cache(self, j, k):
+        self.layers[j].init_cache_one_gpu_batch(self.cache_home[j][k])
+
+    def load_cache(self, i, j, k, overlap=True):
+        # Handle corner cases
+        if i == 0:  # prefill, no cache
+            return
+        if k == self.num_gpu_batches:
+            k = 0
+            j += 1
+        if j == self.num_layers:
+            j = 0
+            i += 1
+            if i == self.execute_gen_len:
+                return
+
+        # Load from cache_home to cache_read_buf
+        if overlap:
+            with torch.cuda.stream(self.load_cache_stream):
+                self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
+        else:
+            self.layers[j].load_cache(self.cache_home[j][k], self.cache_read_buf[j][k], i)
+
+    def store_cache(self, i, j, k, overlap=True):
+        # Handle corner cases
+        if k == -1:
+            k = self.num_gpu_batches - 1
+            j -= 1
+        if j == -1:
+            j = self.num_layers - 1
+            i -= 1
+            if i == -1:
+                return
+        if i == self.task.gen_len - 1:  # last token, no need to store cache
+            self.cache_write_buf[j][k].pop()
+            return
+
+        # Store cache_write_buf to cache_home
+        # Delete cache_write_buf
+        if overlap:
+            with torch.cuda.stream(self.store_cache_stream):
+                self.layers[j].store_cache(self.cache_home[j][k], self.cache_write_buf[j][k], i)
+        else:
+            self.layers[j].store_cache(self.cache_home[j][k], self.cache_write_buf[j][k], i)
+
+    def delete_cache(self, j, k):
+        v = self.cache_home[j][k].pop()
+        if v:
+            for x in v:
+                x.delete()
+
+    def load_hidden(self, i, j, k):
+        # Handle corner cases
+        if k == self.num_gpu_batches:
+            k = 0
+            j += 1
+        if j == self.num_layers:
+            j = 0
+            i += 1
+            if i == self.execute_gen_len:
+                return
+
+        # Load to hidden states buffers
+        dst = self.layers[j].compute
+        if j == 0:
+            gpu_batch_size = self.policy.gpu_batch_size
+            left, right = k * gpu_batch_size, (k + 1) * gpu_batch_size
+            if i == 0:  # load from the input ids
+                val = dst.allocate((gpu_batch_size, self.task.prompt_len), np.int32)
+                val.load_from_np(self.output_ids[left:right, :self.task.prompt_len])
+            else:  # load from the last generated token
+                pos = self.task.prompt_len + i
+                val = dst.allocate((gpu_batch_size, 1), np.int32)
+                val.load_from_np(self.output_ids[left:right, pos - 1:pos])
+        else:  # load from the last layer
+            val = self.hidden[i][j - 1][k].pop().move(dst)
+        self.hidden[i][j][k].store(val)
+
+    def store_hidden(self, i, j, k):
+        # Handle corner cases
+        if k == -1:
+            k = self.num_gpu_batches - 1
+            j -= 1
+        if j == -1:
+            j = self.num_layers - 1
+            i -= 1
+            if i == -1:
+                return
+
+        # Store to hidden states buffers
+        if j == self.num_layers - 1:  # store to output
+            gpu_batch_size = self.policy.gpu_batch_size
+            left, right = k * gpu_batch_size, (k + 1) * gpu_batch_size
+            ids = self.hidden[i][j][k].pop().data.detach().cpu().numpy()
+            pos = self.task.prompt_len + i
+            if self.task.stop:
+                stopped = self.stopped[left:right]
+                self.output_ids[left:right, pos:pos + 1] = np.where(
+                    stopped, self.config.pad_token_id, ids)
+                stopped[:] = np.logical_or(stopped, ids == self.task.stop)
+            else:
+                self.output_ids[left:right, pos:pos + 1] = ids
+        else:  # move to home
+            x = self.hidden[i][j][k]
+            if x.val:  # x may already be moved due to overlapping
+                x.val = x.val.move(self.act_home)
+
+    def compute_layer(self, i, j, k):
+        # Update the hidden in place
+        # Clear the weight_read_buf if it is the last gpu batch
+        # Clear the cache_read_buf
+        # Run layer computation
+        self.layers[j].forward(self.hidden[i][j][k], self.cache_read_buf[j][k],
+                               self.weight_read_buf[j], self.attention_mask[k],
+                               self.cache_write_buf[j][k], i, k)
+
+    def sync(self):
+        self.env.disk.synchronize()
+        torch.cuda.synchronize()
+
+    def init_all_weights(self):
+        self.weight_home = array_1d(self.num_layers, ValueHolder)
+        for j in range(self.num_layers):
+            self.init_weight(j)
+
+    def delete_all_weights(self):
+        for j in range(self.num_layers):
+            self.delete_weight(j, 0)
+
+    def update_attention_mask(self, i, k):
+        if i > 0:
+            mask = self.attention_mask[k]
+            assert mask.val is not None
+            mask.val = mask.val.device.extend_attention_mask(mask.val, [True])
+            return
+
+        gpu_batch_size = self.policy.gpu_batch_size
+        left = k * gpu_batch_size
+        right = left + gpu_batch_size
+        input_ids = self.output_ids[left:right, :self.task.prompt_len]
+
+        attention_compute = (self.env.cpu if self.policy.cpu_cache_compute
+            else self.env.gpu)
+        val = attention_compute.allocate(
+            (self.policy.gpu_batch_size, self.task.prompt_len), bool)
+        val.load_from_np((input_ids != self.config.pad_token_id))
+        self.attention_mask[k].store(val)
+
+
