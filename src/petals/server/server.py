@@ -193,6 +193,7 @@ class Server:
 
         if quant_type is None:
             quant_type = QuantType.NF4 if device.type == "cuda" else QuantType.NONE
+        quant_type = QuantType.NONE ########## manually change the QuantType
         self.quant_type = quant_type
         logger.info(f"Model weights are loaded in {get_dtype_name(torch_dtype, quant_type)} format")
 
@@ -266,9 +267,10 @@ class Server:
                 self.block_config,
                 device,
                 torch_dtype,
-                self.env,
-                self.policy,
-                self.weight_home,
+                self.env, #####
+                self.policy, #####
+                self.weight_home, #####
+                self.path, #####
                 num_blocks=num_blocks,
                 quant_type=quant_type,
                 tensor_parallel_devices=self.tensor_parallel_devices,

@@ -88,12 +88,12 @@ def init_weight_list(weight_specs, policy, env):
     
 
 
-class LlamaRMSNorm(nn.Module):
+class FLEX_LlamaRMSNorm(LlamaRMSNorm):
     def __init__(self, hidden_size, eps=1e-6):
         """
         LlamaRMSNorm is equivalent to T5LayerNorm
         """
-        super().__init__()
+        super().__init__(hidden_size, eps=1e-6)
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
@@ -234,6 +234,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         self.layer_id = layer_id
         print('OptimizedLlamaDecoderLayer config ', config)
         self.config = config
+        # self.devices = (device(type='cuda', index=0),)
         self.num_heads = config.num_attention_heads
         # self.self_attn = OptimizedLlamaAttention(config=config, layer_idx=0)
         # self.mlp = LlamaMLP(config=config)
@@ -242,8 +243,8 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         #layer_idx only matters for KV caching, and we re-implement it in Petals
         self.mlp = FLEX_LlamaMLP(config=config, env=env, policy=policy,layer_id=self.layer_id )
          ########---------------------------------------------
-        # self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        # self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = FLEX_LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = FLEX_LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.pre_attn_graph = None
         self.post_attn_graph = None
@@ -311,6 +312,96 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             download_llama_weights(self.llama_config.name, self.path)
         self.layers[j].init_weight(self.weight_home[j], expanded_path)
         
+    def generation_loop_normal(self):
+        for i in range(self.execute_gen_len):
+            timers("generate").start()
+            for k in range(self.num_gpu_batches):
+                self.update_attention_mask(i, k)
+            for j in range(self.num_layers):
+                for k in range(self.num_gpu_batches):
+                    self.load_weight(i, j, k, overlap=False)
+
+                for k in range(self.num_gpu_batches):
+                    self.load_cache(i, j, k, overlap=False)
+                    self.load_hidden(i, j, k)
+                    self.compute_layer(i, j, k)
+                    self.store_hidden(i, j, k)
+                    self.store_cache(i, j, k, overlap=False)
+            timers("generate").stop()
+    
+    
+    # the block only need forward, not need generate function
+    def generate(
+        self,
+        inputs,
+        max_new_tokens: int=32,
+        do_sample: bool=True,
+        temperature: float=0.6,
+        stop: Optional[int] = None,
+        debug_mode: Optional[str] = None,
+        cut_gen_len: Optional[int] = None,
+        top_p: float = 0.9,
+        verbose: int = 0):
+        task = Task(
+            inputs=inputs,
+            prompt_len=len(inputs[0]),
+            gen_len=max_new_tokens,
+            cut_gen_len=cut_gen_len,
+            do_sample=do_sample,
+            temperature=temperature,
+            stop=stop,
+            top_p=top_p
+        )
+        num_layers = self.num_layers
+        num_gpu_batches = self.num_gpu_batches
+        gpu_batch_size = self.policy.gpu_batch_size
+        overlap = self.policy.overlap
+        prompt_len, gen_len = task.prompt_len, task.gen_len
+        self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
+
+        # Output token ids
+        self.output_ids = np.full((len(task.inputs), prompt_len + gen_len),
+            self.config.pad_token_id, dtype=np.int32)
+        self.stopped = np.zeros((len(task.inputs), 1), dtype=bool)
+        self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
+        assert gpu_batch_size * num_gpu_batches == len(task.inputs)
+
+        # Intermediate tensors
+        # The following buffers store values used
+        # for the i-th token, j-th layer, k-th gpu batch.
+        num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
+        for j in range(num_layers):
+            for k in range(num_gpu_batches):
+                self.cache_home[j][k].clear()
+                self.cache_read_buf[j][k].clear()
+                self.cache_write_buf[j][k].clear()
+        for j in range(num_layers):
+            self.weight_read_buf[j].clear()
+        for k in range(num_gpu_batches):
+            self.attention_mask[k].clear()
+        self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
+
+        # Init cache
+        self.set_task(task)
+        for j in range(num_layers):
+            for k in range(num_gpu_batches):
+                self.init_cache(j, k)
+        if self.policy.cpu_cache_compute:
+            self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
+
+        self.generation_loop_normal()
+        
+        # Delete cache
+        for j in range(num_layers):
+            for k in range(num_gpu_batches):
+                self.delete_cache(j, k)
+        if self.policy.cpu_cache_compute:
+            self.env.cpu.del_attention_compute_workspace()
+
+        return self.output_ids
+    
+    
+    
     def _optimized_input_layernorm(self, hidden_states):
         if self.pre_attn_graph is None:
             self.pre_attn_graph = make_inference_graphed_callable(
@@ -356,11 +447,21 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             hidden_states = self._optimized_input_layernorm(hidden_states)
         else:
             hidden_states = self.input_layernorm(hidden_states)
-
+            
+        if k == self.policy.num_gpu_batches - 1:
+            read_buf1, read_buf2 = weight_read_buf.pop()
+        else:
+            read_buf1, read_buf2 = weight_read_buf.val
+            
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
+            cache_read_buf=cache_read_buf,
+            cache_write_buf=cache_write_buf,
+            weight_read_buf=read_buf1,
+            i=i,
+            k=k,
             position_ids=position_ids, # i, the iterator of sequence length
             past_key_value=past_key_value,
             output_attentions=output_attentions,
@@ -379,7 +480,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         else:
             hidden_states = self.post_attention_layernorm(hidden_states)
         # import pdb; pdb.set_trace() ###### <------
-        hidden_states = self.mlp(hidden_states) ###### <------
+        hidden_states = self.mlp(hidden_states, cache_read_buf=None, cache_write_buf=None, weight_read_buf=read_buf2, i=i, k=k, attention_mask=attention_mask) ###### <------
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)

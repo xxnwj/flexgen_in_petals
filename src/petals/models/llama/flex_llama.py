@@ -206,91 +206,93 @@ class InputEmbed:
         hidden.val = h
 
 
-class LlamaRMSNorm(nn.Module):
-    def __init__(
-        self,
-        config: LlamaConfig,
-        env: ExecutionEnv,
-        policy: Policy,
-        layer_id: int,
-    ):
-        super().__init__()
-        self.config = config
-        self.env = env
-        self.layer_id = layer_id
-        self.policy = policy
-        self.compute = self.env.gpu
-        self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
-                                else self.compute)
+# class LlamaRMSNorm(nn.Module):
+#     def __init__(
+#         self,
+#         config: LlamaConfig,
+#         env: ExecutionEnv,
+#         policy: Policy,
+#         layer_id: int,
+#     ):
+#         super().__init__()
+#         self.config = config
+#         self.env = env
+#         self.layer_id = layer_id
+#         self.policy = policy
+#         self.compute = self.env.gpu
+#         self.weight_load_dst = (self.compute.compressed_device if policy.compress_weight
+#                                 else self.compute)
 
-        self.task = None
+#         self.task = None
+#         self.weight = nn.Parameter(torch.ones(hidden_size))
+#         self.variance_epsilon = eps
 
-    def set_task(self, task):
-        self.task = task
+#     def set_task(self, task):
+#         self.task = task
 
-    def init_weight(self, weight_home, path):
-        intermediate_size, h, dtype = (self.config.intermediate_size, self.config.input_dim, self.config.dtype)
-        path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
-        weight_specs = [
-            # 4 weight files
-            # gate_proj
-            ((intermediate_size, h), dtype, path + "mlp.gate_proj.weight"),
-            # down_proj
-            ((h, intermediate_size), dtype, path + "mlp.down_proj.weight"),
-            # up_proj
-            ((intermediate_size, h), dtype, path + "mlp.up_proj.weight"),
-            # post attention layer norm
-            ((h, ), dtype, path + "post_attention_layernorm.weight"),
-        ]
-        weights = init_weight_list(weight_specs, self.policy, self.env)
-        weight_home.store(weights)
+#     def init_weight(self, weight_home, path):
+#         intermediate_size, h, dtype = (self.config.intermediate_size, self.config.input_dim, self.config.dtype)
+#         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
+#         weight_specs = [
+#             # 4 weight files
+#             # gate_proj
+#             ((intermediate_size, h), dtype, path + "mlp.gate_proj.weight"),
+#             # down_proj
+#             ((h, intermediate_size), dtype, path + "mlp.down_proj.weight"),
+#             # up_proj
+#             ((intermediate_size, h), dtype, path + "mlp.up_proj.weight"),
+#             # post attention layer norm
+#             ((h, ), dtype, path + "post_attention_layernorm.weight"),
+#         ]
+#         weights = init_weight_list(weight_specs, self.policy, self.env)
+#         weight_home.store(weights)
 
-    def load_weight(self, weight_home, weight_read_buf, k):
-        gate, down, up, post_attention_layernorm = weight_home.val
-        if k == 0:
-            dst1 = self.weight_load_dst
-            dst2 = self.compute
-            weight_read_buf.store((
-                    gate.smart_copy(dst1),
-                    down.smart_copy(dst1),
-                    up.smart_copy(dst1),
-                    post_attention_layernorm.smart_copy(dst2)
-            ))
+#     def load_weight(self, weight_home, weight_read_buf, k):
+#         gate, down, up, post_attention_layernorm = weight_home.val
+#         if k == 0:
+#             dst1 = self.weight_load_dst
+#             dst2 = self.compute
+#             weight_read_buf.store((
+#                     gate.smart_copy(dst1),
+#                     down.smart_copy(dst1),
+#                     up.smart_copy(dst1),
+#                     post_attention_layernorm.smart_copy(dst2)
+#             ))
 
-    def init_cache_one_gpu_batch(self, cache_home):
-        pass  # do nothing
+#     def init_cache_one_gpu_batch(self, cache_home):
+#         pass  # do nothing
 
-    def load_cache(self, cache_home, cache_read_buf, i):
-        pass  # do nothing
+#     def load_cache(self, cache_home, cache_read_buf, i):
+#         pass  # do nothing
 
-    def store_cache(self, cache_home, cache_write_buf, i):
-        pass  # do nothing
+#     def store_cache(self, cache_home, cache_write_buf, i):
+#         pass  # do nothing
 
-    def input_act_shape_and_dtype(self, batch_size, seq_len):
-        return (batch_size, seq_len, self.config.input_dim), self.config.dtype
+#     def input_act_shape_and_dtype(self, batch_size, seq_len):
+#         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
-    def forward(self, 
-        x,
-        cache_read_buf,
-        weight_read_buf,
-        attention_mask,
-        cache_write_buf,
-        i=0,
-        k: int = 0
-        ):
-        donate = [False] * 9
-        h, donate[0] = x.val, True
+#     def forward(self, 
+#         x,
+#         cache_read_buf,
+#         weight_read_buf,
+#         attention_mask,
+#         cache_write_buf,
+#         i=0,
+#         k: int = 0
+#         ):
+#         donate = [False] * 9
+#         h, donate[0] = x.val, True
 
-        if k == self.policy.num_gpu_batches - 1:
-            # Clear the weight_read_buf if it is the last gpu batch
-            ((gate, donate[1]), (down, donate[3]),
-             (up, donate[5]), (post_attention_layernorm, donate[7])) = weight_read_buf.pop()
-        else:
-            ((gate, _), (down, _),
-             (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
+#         if k == self.policy.num_gpu_batches - 1:
+#             # Clear the weight_read_buf if it is the last gpu batch
+#             ((gate, donate[1]), (down, donate[3]),
+#              (up, donate[5]), (post_attention_layernorm, donate[7])) = weight_read_buf.pop()
+#         else:
+#             ((gate, _), (down, _),
+#              (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
 
-        h = self.compute.mlp_llama(h, gate, down, up, donate, self.config, post_attention_layernorm)
-        x.val = h
+#         h = self.compute.mlp_llama(h, gate, down, up, donate, self.config, post_attention_layernorm)
+#         x.val = h
 
 
 
@@ -300,8 +302,8 @@ class FLEX_LlamaAttention(LlamaAttention):
     def __init__(self, config: LlamaConfig, env: ExecutionEnv, policy: Policy, layer_id: int):
         # import pdb; pdb.set_trace()
         super().__init__(config)
-        # self.config = config
-        self.config = get_llama_config('huggyllama/llama-7b')
+        self.config = config
+        self.llama_config = get_llama_config('huggyllama/llama-7b')
         # self.config.input_dim = self.config.hidden_size
         # self.config.dtype= np.float16
         self.num_heads = config.num_attention_heads
@@ -320,7 +322,8 @@ class FLEX_LlamaAttention(LlamaAttention):
         self.task = task
 
     def init_weight(self, weight_home, path):
-        h, dtype = (self.config.input_dim, self.config.dtype)
+        # h, dtype = (self.config.input_dim, self.config.dtype)
+        h, dtype = (self.config.hidden_size, np.float16)
         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
         weight_specs = [
             # 5 weight files
@@ -513,8 +516,8 @@ class FLEX_LlamaMLP(LlamaMLP):
         layer_id: int,
     ):
         super().__init__(config)
-        # self.config = config
-        self.config = get_llama_config('huggyllama/llama-7b')
+        self.config = config
+        self.llama_config = get_llama_config('huggyllama/llama-7b')
         self.env = env
         self.layer_id = layer_id
         self.policy = policy
@@ -528,8 +531,10 @@ class FLEX_LlamaMLP(LlamaMLP):
         self.task = task
 
     def init_weight(self, weight_home, path):
-        print('self.config ', self.config)
-        intermediate_size, h, dtype = (self.config.intermediate_size, self.config.input_dim, self.config.dtype)
+        print('self.llama_config ', self.llama_config)
+        # intermediate_size, h, dtype = (self.config.intermediate_size, self.config.input_dim, self.config.dtype)
+        intermediate_size, h, dtype = (self.config.intermediate_size, self.config.hidden_size, np.float16)
+        
         path = os.path.join(os.path.join(path, f"layers.{self.layer_id}."))
         weight_specs = [
             # 4 weight files

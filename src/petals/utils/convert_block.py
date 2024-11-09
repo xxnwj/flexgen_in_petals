@@ -52,13 +52,16 @@ def convert_block(
     # print()
     # import pdb; pdb.set_trace()
     # print()
+    
     block = make_tensor_parallel(block, config, tensor_parallel_devices, output_device=output_device)
-    import pdb; pdb.set_trace()
+    
     if quant_type != QuantType.NONE:
         block = quantize_module(block, quant_type=quant_type)
 
     for shard, device in zip(block.module_shards, block.devices):
         shard.to(device)
+    # for shard, device in zip(block.modules, block.devices):
+    #     shard.to(device)
     print('quant_type ', quant_type)
     print('adapters ', adapters )
     if adapters:
@@ -83,6 +86,7 @@ def quantize_module(model: nn.Module, *, quant_type: QuantType) -> nn.Module:
 
     for n, module in model.named_children():
         if len(list(module.children())) > 0:
+            # import pdb; pdb.set_trace() 
             quantize_module(module, quant_type=quant_type)
 
         if isinstance(module, torch.nn.Linear) and n not in ["lm_head", "score"]:

@@ -46,9 +46,10 @@ def get_server_throughput(
     config: PretrainedConfig,
     device: torch.device,
     dtype: Union[str, torch.dtype],
-    env: ExecutionEnv,
-    policy: Policy,
-    weight_home: array_1d,
+    env: ExecutionEnv,########
+    policy: Policy,########
+    weight_home: array_1d,########
+    path: str, ########
     *,
     num_blocks: int,
     quant_type: QuantType,
@@ -91,7 +92,7 @@ def get_server_throughput(
 
         if cache_key not in cache:
             cache[cache_key] = measure_throughput_info(
-                config, device, dtype, env, policy,weight_home, quant_type=quant_type, tensor_parallel_devices=tensor_parallel_devices
+                config, device, dtype, env, policy,weight_home,path, quant_type=quant_type, tensor_parallel_devices=tensor_parallel_devices
             )
 
             try:
@@ -122,9 +123,10 @@ def measure_throughput_info(
     config: PretrainedConfig,
     device: torch.device,
     dtype: torch.dtype,
-    env: ExecutionEnv,
-    policy: Policy,
-    weight_home: array_1d,
+    env: ExecutionEnv, ####
+    policy: Policy, ####
+    weight_home: array_1d, ####
+    path : str, ####
     *,
     quant_type: QuantType,
     tensor_parallel_devices: Sequence[torch.device],
@@ -139,7 +141,8 @@ def measure_throughput_info(
             dtype,
             env,  #####
             policy, #####
-            weight_home, #####
+            weight_home, #####,
+            path, ####
             quant_type=quant_type,
             tensor_parallel_devices=tensor_parallel_devices,
             n_tokens=1,
@@ -153,6 +156,7 @@ def measure_throughput_info(
             env,  #####
             policy, #####
             weight_home, #####
+            path, ####
             quant_type=quant_type,
             tensor_parallel_devices=tensor_parallel_devices,
             n_tokens=1024,
@@ -213,6 +217,7 @@ def measure_compute_rps(
     env: ExecutionEnv,  #####
     policy: Policy, #####
     weight_home:array_1d, #####
+    path: str, #####
     *,
     quant_type: QuantType,
     tensor_parallel_devices: Sequence[torch.device],
@@ -224,16 +229,18 @@ def measure_compute_rps(
     if not tensor_parallel_devices:
         tensor_parallel_devices = (device,)
     with torch.inference_mode():
-        block = get_model_block(config, env, policy, weight_home) #####
+        block = get_model_block(config, env, policy, weight_home, path) #####
         block = block.to(dtype)
         block = convert_block(block, 0, config, tensor_parallel_devices, device, quant_type=quant_type, freeze=True)
 
         cache = (DUMMY_KEY_PAST.to(dtype=dtype, device=device), DUMMY_KEY_PAST.to(dtype=dtype, device=device))
         elapsed = 0
         dummy_input = torch.randn(1, n_tokens, config.hidden_size, device=device, dtype=dtype)
-
+        
+        
         # Skip the 1st step to exclude the initialization time
         def step(cache_):
+            import pdb; pdb.set_trace()
             outputs = block.forward(dummy_input, use_cache=inference, layer_past=cache_ if inference else None)
             return outputs[1] if inference else None
 
