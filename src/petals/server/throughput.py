@@ -240,7 +240,7 @@ def measure_compute_rps(
         
         # Skip the 1st step to exclude the initialization time
         def step(cache_):
-            import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()
             outputs = block.forward(dummy_input, use_cache=inference, layer_past=cache_ if inference else None)
             return outputs[1] if inference else None
 

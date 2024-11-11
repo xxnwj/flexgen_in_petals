@@ -262,7 +262,7 @@ class Server:
         assert isinstance(throughput, float) or throughput in ["auto", "eval", "dry_run"]
         if throughput in ["auto", "eval", "dry_run"]:
             force_eval = throughput in ["eval", "dry_run"]
-            throughput_info = get_server_throughput(
+            throughput_info = get_server_throughput( # #######
                 converted_model_name_or_path,
                 self.block_config,
                 device,

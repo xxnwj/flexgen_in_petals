@@ -667,8 +667,8 @@ class OutputEmbed:
 class LlamaDecoderLayer(nn.Module):
     def __init__(self, config: LlamaConfig, env: ExecutionEnv, policy: Policy, layer_id: int):
         
-        self.self_attn = LlamaAttention(config=config, env=env, policy=policy, layer_id=layer_id)
-        self.mlp = LlamaMLP(
+        self.self_attn = FLEX_LlamaAttention(config=config, env=env, policy=policy, layer_id=layer_id)
+        self.mlp = FLEX_LlamaMLP(
             layer_id=layer_id,
             env=env,
             policy=policy,
