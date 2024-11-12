@@ -22,7 +22,7 @@ from transformers.models.llama.modeling_llama import (
 
 
 
-
+import numpy as np
 from petals.utils.cuda_graphs import make_inference_graphed_callable
 # from petals.flexgen_utils.utils import ExecutionEnv
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
@@ -33,6 +33,7 @@ from petals.flexgen_utils.utils import ValueHolder, array_1d, array_2d, array_3d
 from petals.models.llama.flex_llama import FLEX_LlamaAttention, FLEX_LlamaMLP, LlamaDecoderLayer
 from petals.models.llama.llama_config import get_llama_config
 from petals.flexgen_utils.task import Task
+from transformers import AutoTokenizer
 import os
 
 fix_recursive_import()
@@ -152,12 +153,14 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        output_attentions= False #########
         assert not output_attentions
         if position_ids is None:
             past_seen_tokens = past_key_value[0].shape[2] if past_key_value is not None else 0
             position_ids = torch.arange(
                 past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
             ).unsqueeze(0)
+        print('OptimizedLlamaAttention position_ids,', position_ids)
 
         bsz, q_len, _ = hidden_states.size()
 
@@ -302,6 +305,10 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         self.init_all_weights()
         print('OptimizedLlamaDecoderLayer self.config', self.config)
         
+    def set_task(self, task):
+        self.task = task
+        for l in self.layers:
+            l.set_task(task)
         
     def init_all_weights(self):
         self.weight_home = array_1d(self.num_layers, ValueHolder)
@@ -422,6 +429,25 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             )
         return self.post_attn_graph(hidden_states)
 
+    def update_attention_mask(self, i, k):
+        if i > 0:
+            mask = self.attention_mask[k]
+            assert mask.val is not None
+            mask.val = mask.val.device.extend_attention_mask(mask.val, [True])
+            return
+
+        gpu_batch_size = self.policy.gpu_batch_size
+        left = k * gpu_batch_size
+        right = left + gpu_batch_size
+        # input_ids = self.output_ids[left:right, :self.task.prompt_len]#####
+
+        attention_compute = (self.env.cpu if self.policy.cpu_cache_compute
+            else self.env.gpu)
+        val = attention_compute.allocate(
+            (self.policy.gpu_batch_size, self.task.prompt_len), bool)
+        # val.load_from_np((input_ids != self.config.pad_token_id)) #######
+        self.attention_mask[k].store(val)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -468,9 +494,16 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         #     read_buf1, read_buf2 = weight_read_buf.pop()
         # else:
         #     read_buf1, read_buf2 = weight_read_buf.val
+        tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b", padding_side="left")
+        tokenizer.pad_token = '[PAD]'
+        # num_prompts = args.num_gpu_batches * args.gpu_batch_size
+        num_prompts = 1
+        # prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
+        prompt_len, gen_len, cut_gen_len = 32, 32, 32
+        inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
         task = Task(
-            inputs=hidden_states,
-            prompt_len=len(hidden_states[0]),
+            inputs=inputs,
+            prompt_len=len(inputs[0]),
             gen_len=max_new_tokens,
             cut_gen_len=cut_gen_len,
             do_sample=do_sample,
@@ -482,9 +515,13 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         num_gpu_batches = self.num_gpu_batches
         gpu_batch_size = self.policy.gpu_batch_size
         overlap = self.policy.overlap
+        num_prompts = len(task.inputs)
         prompt_len, gen_len = task.prompt_len, task.gen_len
-        self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
-
+        
+        
+        # Output token ids
+        # self.output_ids = np.ones((num_prompts, prompt_len + gen_len), dtype=np.int64)
+        # self.output_ids[:, :prompt_len] = np.asarray(task.inputs.cpu())
         
         num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
         for j in range(num_layers):
@@ -499,18 +536,22 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
 
         # Init cache
+        self.task = task
         self.set_task(task)
+        print('self.task ', self.task)
         for j in range(num_layers):
             for k in range(num_gpu_batches):
                 self.init_cache(j, k)
         if self.policy.cpu_cache_compute:
             self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
-
+        
+        debug_mode = None #######
+        overlap = False #######
         if debug_mode is None:
             if not overlap:
                 # No overlap, easy to understand, suitable for debugging
                 # self.generation_loop_normal()
-                i = position_ids
+                i = 0 ############# to simplify the woekflow, we only consider the one token each time 
                 for k in range(self.num_gpu_batches):
                     self.update_attention_mask(i, k)
                 for j in range(self.num_layers):
@@ -560,7 +601,13 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # import pdb; pdb.set_trace() ###### <------
         # hidden_states = self.mlp(hidden_states, cache_read_buf=None, cache_write_buf=None, weight_read_buf=read_buf2, i=position_ids, k=k, attention_mask=attention_mask) ###### <------
         # hidden_states = residual + hidden_states
-        hidden_states = self.hidden
+        print('self.hidden ')
+        print(self.hidden) # it's a ValueHolder, 
+        hidden_states = self.hidden.val.data
+        # self.hidden.val is a TorchTensor, the 
+        shape = self.get_shape_3d(hidden_states)  
+        print("Shape:", shape)  # Output: Shape: (32, 2, 1)  
+        
         outputs = (hidden_states,)
 
         # if output_attentions:
@@ -570,7 +617,16 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         #     outputs += (present_key_value,)
 
         return outputs
+    
+    def get_shape_3d(self, lst):  
+        if not lst:  # Check if the outer list is empty  
+            return (0, 0, 0)  
 
+        depth = len(lst)  
+        num_rows = len(lst[0]) if lst[0] else 0  # Length of the first inner list  
+        num_cols = len(lst[0][0]) if lst[0] and lst[0][0] else 0  # Length of the first innermost list  
+        return (depth, num_rows, num_cols) 
+    
     def set_task(self, task):
         self.self_attn.set_task(task)
         self.mlp.set_task(task)
@@ -667,11 +723,11 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             left, right = k * gpu_batch_size, (k + 1) * gpu_batch_size
             if i == 0:  # load from the input ids
                 val = dst.allocate((gpu_batch_size, self.task.prompt_len), np.int32)
-                val.load_from_np(self.output_ids[left:right, :self.task.prompt_len])
+                # val.load_from_np(self.output_ids[left:right, :self.task.prompt_len])
             else:  # load from the last generated token
                 pos = self.task.prompt_len + i
                 val = dst.allocate((gpu_batch_size, 1), np.int32)
-                val.load_from_np(self.output_ids[left:right, pos - 1:pos])
+                # val.load_from_np(self.output_ids[left:right, pos - 1:pos])
         else:  # load from the last layer
             val = self.hidden[i][j - 1][k].pop().move(dst)
         self.hidden[i][j][k].store(val)
@@ -711,6 +767,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # Clear the weight_read_buf if it is the last gpu batch
         # Clear the cache_read_buf
         # Run layer computation
+        print('compute_layer', self.hidden[i][j][k])
         self.layers[j].forward(self.hidden[i][j][k], self.cache_read_buf[j][k],
                                self.weight_read_buf[j], self.attention_mask[k],
                                self.cache_write_buf[j][k], i, k)
@@ -795,3 +852,18 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
         return (key_states, value_states)
 
 
+def get_test_inputs(prompt_len, num_prompts, tokenizer):
+    prompts = [
+        # "Simply put, the theory of relativity states that ",
+
+        "I believe the meaning of life is",
+
+        # """Translate English to French:
+        # sea otter => loutre de mer
+        # peppermint => menthe poivrée
+        # plush girafe => girafe peluche
+        # cheese =>""",
+    ]
+    input_ids = tokenizer(prompts, padding="max_length",
+                          max_length=prompt_len).input_ids
+    return (input_ids[0],) * num_prompts
