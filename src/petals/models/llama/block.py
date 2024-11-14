@@ -145,7 +145,7 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,  # ValueHolder.val : TorchTensor.data: torch.Tensor
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
@@ -155,14 +155,17 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         output_attentions= False #########
         assert not output_attentions
+        
+        
         if position_ids is None:
             past_seen_tokens = past_key_value[0].shape[2] if past_key_value is not None else 0
             position_ids = torch.arange(
                 past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
             ).unsqueeze(0)
         print('OptimizedLlamaAttention position_ids,', position_ids)
-
-        bsz, q_len, _ = hidden_states.size()
+        import pdb; pdb.set_trace()
+        # bsz, q_len, _ = hidden_states.size()
+        bsz, q_len, _ = hidden_states.val.data.size()
 
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
@@ -343,76 +346,6 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
     #         timers("generate").stop()
     
     
-    # the block only need forward, not need generate function
-    def generate(
-        self,
-        inputs,
-        max_new_tokens: int=32,
-        do_sample: bool=True,
-        temperature: float=0.6,
-        stop: Optional[int] = None,
-        debug_mode: Optional[str] = None,
-        cut_gen_len: Optional[int] = None,
-        top_p: float = 0.9,
-        verbose: int = 0):
-        task = Task(
-            inputs=inputs,
-            prompt_len=len(inputs[0]),
-            gen_len=max_new_tokens,
-            cut_gen_len=cut_gen_len,
-            do_sample=do_sample,
-            temperature=temperature,
-            stop=stop,
-            top_p=top_p
-        )
-        num_layers = self.num_layers
-        num_gpu_batches = self.num_gpu_batches
-        gpu_batch_size = self.policy.gpu_batch_size
-        overlap = self.policy.overlap
-        prompt_len, gen_len = task.prompt_len, task.gen_len
-        self.execute_gen_len = task.cut_gen_len if task.cut_gen_len else task.gen_len
-
-        # Output token ids
-        self.output_ids = np.full((len(task.inputs), prompt_len + gen_len),
-            self.config.pad_token_id, dtype=np.int32)
-        self.stopped = np.zeros((len(task.inputs), 1), dtype=bool)
-        self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
-        assert gpu_batch_size * num_gpu_batches == len(task.inputs)
-
-        # Intermediate tensors
-        # The following buffers store values used
-        # for the i-th token, j-th layer, k-th gpu batch.
-        num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
-                self.cache_home[j][k].clear()
-                self.cache_read_buf[j][k].clear()
-                self.cache_write_buf[j][k].clear()
-        for j in range(num_layers):
-            self.weight_read_buf[j].clear()
-        for k in range(num_gpu_batches):
-            self.attention_mask[k].clear()
-        self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
-
-        # Init cache
-        self.set_task(task)
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
-                self.init_cache(j, k)
-        if self.policy.cpu_cache_compute:
-            self.env.cpu.init_attention_compute_workspace(self.config, self.task, self.policy)
-
-        self.generation_loop_normal()
-        
-        # Delete cache
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
-                self.delete_cache(j, k)
-        if self.policy.cpu_cache_compute:
-            self.env.cpu.del_attention_compute_workspace()
-
-        return self.output_ids
-    
     
     
     def _optimized_input_layernorm(self, hidden_states):
@@ -501,6 +434,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
         prompt_len, gen_len, cut_gen_len = 32, 32, 32
         inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
+        print('inputs , ', inputs)
         task = Task(
             inputs=inputs,
             prompt_len=len(inputs[0]),
@@ -520,8 +454,10 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         
         
         # Output token ids
-        # self.output_ids = np.ones((num_prompts, prompt_len + gen_len), dtype=np.int64)
-        # self.output_ids[:, :prompt_len] = np.asarray(task.inputs.cpu())
+        self.output_ids = np.ones((num_prompts, prompt_len + gen_len), dtype=np.int64)
+        print('output ids ', self.output_ids)
+        self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
+        print('output ids ', self.output_ids)
         
         num_layers, num_gpu_batches = self.num_layers, self.policy.num_gpu_batches
         for j in range(num_layers):
@@ -576,11 +512,6 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # # Self Attention
         # hidden_states, self_attn_weights, present_key_value = self.self_attn(
         #     hidden_states=hidden_states,
-        #     attention_mask=attention_mask,
-        #     cache_read_buf=cache_read_buf,
-        #     cache_write_buf=cache_write_buf,
-        #     weight_read_buf=read_buf1,
-        #     k=k, # the num_gpu_batches 
         #     position_ids=position_ids, # i, the iterator of sequence length
         #     past_key_value=past_key_value,
         #     output_attentions=output_attentions,
@@ -601,8 +532,8 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # import pdb; pdb.set_trace() ###### <------
         # hidden_states = self.mlp(hidden_states, cache_read_buf=None, cache_write_buf=None, weight_read_buf=read_buf2, i=position_ids, k=k, attention_mask=attention_mask) ###### <------
         # hidden_states = residual + hidden_states
-        print('self.hidden ')
-        print(self.hidden) # it's a ValueHolder, 
+        # print('self.hidden ')
+        # print(self.hidden) # it's a default init ValueHolder, 
         hidden_states = self.hidden.val.data
         # self.hidden.val is a TorchTensor, the 
         shape = self.get_shape_3d(hidden_states)  
@@ -723,7 +654,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             left, right = k * gpu_batch_size, (k + 1) * gpu_batch_size
             if i == 0:  # load from the input ids
                 val = dst.allocate((gpu_batch_size, self.task.prompt_len), np.int32)
-                # val.load_from_np(self.output_ids[left:right, :self.task.prompt_len])
+                val.load_from_np(self.output_ids[left:right, :self.task.prompt_len])
             else:  # load from the last generated token
                 pos = self.task.prompt_len + i
                 val = dst.allocate((gpu_batch_size, 1), np.int32)
@@ -768,6 +699,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # Clear the cache_read_buf
         # Run layer computation
         print('compute_layer', self.hidden[i][j][k])
+        print(self.hidden[i][j][k].val)
         self.layers[j].forward(self.hidden[i][j][k], self.cache_read_buf[j][k],
                                self.weight_read_buf[j], self.attention_mask[k],
                                self.cache_write_buf[j][k], i, k)
@@ -867,3 +799,5 @@ def get_test_inputs(prompt_len, num_prompts, tokenizer):
     input_ids = tokenizer(prompts, padding="max_length",
                           max_length=prompt_len).input_ids
     return (input_ids[0],) * num_prompts
+
+
