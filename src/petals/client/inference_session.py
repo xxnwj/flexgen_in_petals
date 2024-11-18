@@ -243,7 +243,7 @@ class InferenceSession:
         return self._position
 
     @position.setter 
-    def position(self, start_from_position: int) -> None: # 这段代码的作用是设置一个位置属性，并确保所有相关的会话对象都同步更新这个位置。
+    def position(self, start_from_position: int) -> None: # 设置一个位置属性，并确保所有相关的会话对象都同步更新这个位置。
         self._position = start_from_position # set a position attribute and ensure that all related session objects are updated to reflect this position synchronously.
         for session in self._server_sessions:
             assert isinstance(session, _ServerInferenceSession)

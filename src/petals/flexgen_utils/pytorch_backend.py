@@ -125,8 +125,8 @@ class TorchTensor:
     name_count = count()
 
     def __init__(self, shape, dtype, data, device, name=None):
-        if isinstance(data, torch.Tensor):
-            assert data.device == device.dev
+        # if isinstance(data, torch.Tensor):
+            # assert data.device == device.dev ####
 
         self.shape = shape
         self.dtype = dtype

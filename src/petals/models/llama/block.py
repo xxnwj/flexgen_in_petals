@@ -28,7 +28,7 @@ from petals.utils.cuda_graphs import make_inference_graphed_callable
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import
+from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor
 from petals.flexgen_utils.utils import ValueHolder, array_1d, array_2d, array_3d
 from petals.models.llama.flex_llama import FLEX_LlamaAttention, FLEX_LlamaMLP, LlamaDecoderLayer
 from petals.models.llama.llama_config import get_llama_config
@@ -416,7 +416,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         """
 
         residual = hidden_states
-
+        print('docoder layer hidden_states ', hidden_states.shape)
         # if hidden_states.size(1) == 1 and torch.is_inference_mode_enabled() and hidden_states.device.type == "cuda":
         #     hidden_states = self._optimized_input_layernorm(hidden_states)
         # else:
@@ -470,7 +470,15 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         for k in range(num_gpu_batches):
             self.attention_mask[k].clear()
         self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
-
+        import pdb; pdb.set_trace()
+        print("hidden_states,", list(hidden_states)[0])
+        print("hidden_states device,", list(hidden_states)[0].device)
+        print("hidden_states dtype,", list(hidden_states)[0].dtype)
+        data =list(hidden_states)[0]
+        tensor_data = TorchTensor(shape=data.shape, data=data, dtype=data.dtype, device=data.device) 
+        ### device should be TorchDevice Type instead of cuda:0 or cpu
+        self.hidden[0][0][0].store(tensor_data)  
+        
         # Init cache
         self.task = task
         self.set_task(task)
@@ -658,7 +666,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             else:  # load from the last generated token
                 pos = self.task.prompt_len + i
                 val = dst.allocate((gpu_batch_size, 1), np.int32)
-                # val.load_from_np(self.output_ids[left:right, pos - 1:pos])
+                val.load_from_np(self.output_ids[left:right, pos - 1:pos])
         else:  # load from the last layer
             val = self.hidden[i][j - 1][k].pop().move(dst)
         self.hidden[i][j][k].store(val)
@@ -699,6 +707,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # Clear the cache_read_buf
         # Run layer computation
         print('compute_layer', self.hidden[i][j][k])
+        print('compute_layer hidden val.data.shape', self.hidden[i][j][k].val.data.shape)
         print(self.hidden[i][j][k].val)
         self.layers[j].forward(self.hidden[i][j][k], self.cache_read_buf[j][k],
                                self.weight_read_buf[j], self.attention_mask[k],

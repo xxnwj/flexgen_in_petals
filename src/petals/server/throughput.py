@@ -237,10 +237,12 @@ def measure_compute_rps(
         elapsed = 0
         dummy_input = torch.randn(1, n_tokens, config.hidden_size, device=device, dtype=dtype)
         
-        
+        print('measure_compute_rps: dummy_input', dummy_input)
+        print('measure_compute_rps: dummy_input.shape', dummy_input.shape)
         # Skip the 1st step to exclude the initialization time
         def step(cache_):
-            # import pdb; pdb.set_trace()
+            import pdb; pdb.set_trace()
+            print('step block', block)
             outputs = block.forward(dummy_input, use_cache=inference, layer_past=cache_ if inference else None)
             return outputs[1] if inference else None
 
