@@ -28,7 +28,7 @@ from petals.utils.cuda_graphs import make_inference_graphed_callable
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor
+from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor, TorchDevice
 from petals.flexgen_utils.utils import ValueHolder, array_1d, array_2d, array_3d
 from petals.models.llama.flex_llama import FLEX_LlamaAttention, FLEX_LlamaMLP, LlamaDecoderLayer
 from petals.models.llama.llama_config import get_llama_config
@@ -163,7 +163,7 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
                 past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
             ).unsqueeze(0)
         print('OptimizedLlamaAttention position_ids,', position_ids)
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         # bsz, q_len, _ = hidden_states.size()
         bsz, q_len, _ = hidden_states.val.data.size()
 
@@ -470,12 +470,14 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         for k in range(num_gpu_batches):
             self.attention_mask[k].clear()
         self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
-        import pdb; pdb.set_trace()
+        print("hidden_states,", hidden_states)
         print("hidden_states,", list(hidden_states)[0])
         print("hidden_states device,", list(hidden_states)[0].device)
         print("hidden_states dtype,", list(hidden_states)[0].dtype)
-        data =list(hidden_states)[0]
-        tensor_data = TorchTensor(shape=data.shape, data=data, dtype=data.dtype, device=data.device) 
+        data = hidden_states
+        # import pdb; pdb.set_trace()
+        device_ = TorchDevice("cuda:0")
+        tensor_data = TorchTensor(shape=data.shape, data=data, dtype=data.dtype, device=device_) 
         ### device should be TorchDevice Type instead of cuda:0 or cpu
         self.hidden[0][0][0].store(tensor_data)  
         
@@ -504,7 +506,10 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
 
                     for k in range(self.num_gpu_batches):
                         self.load_cache(i, j, k, overlap=False)
-                        self.load_hidden(i, j, k)
+                        if j>0 and k>0:
+                            self.load_hidden(i, j, k) # dummy input shape should be[1,1,4096]
+                        print('self.hidden[i][j][k]', self.hidden[i][j][k].val.data.shape)
+                        import pdb; pdb.set_trace()
                         self.compute_layer(i, j, k)
                         self.store_hidden(i, j, k)
                         self.store_cache(i, j, k, overlap=False)
@@ -582,7 +587,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             with torch.cuda.stream(self.load_weight_stream):
                 self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
         else:
-            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k) ######
 
     def delete_weight(self, j, k):
         if k == 0:
@@ -645,6 +650,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
                 x.delete()
     
     def load_hidden(self, i, j, k):
+        # import pdb; pdb.set_trace()
         # Handle corner cases
         if k == self.num_gpu_batches:
             k = 0
@@ -656,20 +662,22 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
                 return
 
         # Load to hidden states buffers
-        dst = self.layers[j].compute
+        dst = self.layers[j].compute # .compute means the computation on this device 
         if j == 0:
             gpu_batch_size = self.policy.gpu_batch_size
             left, right = k * gpu_batch_size, (k + 1) * gpu_batch_size
-            if i == 0:  # load from the input ids
+            if i == 0:  # load from the input ids #############
                 val = dst.allocate((gpu_batch_size, self.task.prompt_len), np.int32)
                 val.load_from_np(self.output_ids[left:right, :self.task.prompt_len])
+                print('val.data.shape', val.data.shape)
             else:  # load from the last generated token
                 pos = self.task.prompt_len + i
                 val = dst.allocate((gpu_batch_size, 1), np.int32)
                 val.load_from_np(self.output_ids[left:right, pos - 1:pos])
         else:  # load from the last layer
             val = self.hidden[i][j - 1][k].pop().move(dst)
-        self.hidden[i][j][k].store(val)
+        # import pdb; pdb.set_trace()
+        self.hidden[i][j][k].store(val) ############
 
 
     def store_hidden(self, i, j, k):

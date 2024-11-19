@@ -164,8 +164,15 @@ class ValueHolder:
         self.val = None
 
     def store(self, val):
-        assert self.val is None
-        self.val = val
+        # assert self.val is None #####
+        # self.val = val
+        if self.val is None: ####
+            self.val = val ######
+            print('store  val')
+        else : ####
+            self.val = val ######
+            print('update new val')
+        
 
     def pop(self):
         ret = self.val
