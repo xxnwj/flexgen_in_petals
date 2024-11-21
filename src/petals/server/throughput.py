@@ -145,7 +145,7 @@ def measure_throughput_info(
             path, ####
             quant_type=quant_type,
             tensor_parallel_devices=tensor_parallel_devices,
-            n_tokens=1,
+            n_tokens=32, ########## change from 1 ---->  32
             n_steps=100,
             inference=True,
         ),

@@ -600,14 +600,16 @@ class TorchDevice:
             w_k = w_k.device.decompress(w_k)
             w_v = w_v.device.decompress(w_v)
             w_out = w_out.device.decompress(w_out)
-
-        bsz,q_len,h = hidden_states.shape
-
+        
+        bsz,q_len,h = hidden_states.shape   # hidden_states.shape should be   torch.Size([1, 32, 4096])
+        # 32 is the length of inputs.ids
+        # if the length of inputs is 8, the hidden_states.shape should be torch.Size([1, 8, 4096])
         head_dim = h // n_head
         freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq.data)
         scaling = head_dim ** -0.5
         hidden = rms_norm(hidden_states.data, input_layernorm.data)
         # hidden = F.layer_norm(hidden_states.data, (h,), weight=input_layernorm.data)
+        
         q = F.linear(hidden, w_q.data) * scaling
         k = F.linear(hidden, w_k.data)
         v = F.linear(hidden, w_v.data)
@@ -628,9 +630,14 @@ class TorchDevice:
         attn_weights = torch.bmm(q, k)
 
         idx = torch.arange(q_len, device=self.dev)
-        causal_mask = (idx <= idx.view(q_len, 1)).view(1, 1, q_len, q_len)
-        mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask
-
+        causal_mask = (idx <= idx.view(q_len, 1)).view(1, 1, q_len, q_len) 
+        # causal_mask.shape should be torch.Size([1, 1, 32, 32])
+        # 32 is the length of inputs.ids
+        # if the length of inputs is 8, the causal_mask.shape should be torch.Size([1, 1, 8, 8])
+        # import pdb; pdb.set_trace()
+        mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask # shape [1,32]
+        # mask.shape should be torch.Size([1, 1, 32, 32])
+        
         # shape: (b, n_head, s, s)
         attn_weights = attn_weights.view(bsz, n_head, q_len, q_len)
         attn_weights = torch.where(mask, attn_weights, -1e4)
@@ -657,7 +664,8 @@ class TorchDevice:
         else:
             k = TorchTensor.create_from_torch(k, self)
             v = TorchTensor.create_from_torch(v, self)
-
+        ## k.shape (32,32,128)
+        ## v.shape (32,32,128)
         return TorchTensor.create_from_torch(value, self), k, v
 
     def mha_gen_llama(self, inputs, attention_mask, w_q, w_k, w_v,
