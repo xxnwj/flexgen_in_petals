@@ -84,14 +84,14 @@ def load_pretrained_block(
     )
     # state_dict contains weights tensors
     # init_weight_list(state_dict, policy, env, block)
-    # for param_name, _ in block.named_parameters():
-    #     assert param_name in state_dict, f"{param_name} not in state dict"
-    #     param = state_dict[param_name]
-    #     if not str(param.dtype).startswith(("torch.uint", "torch.int", "torch.bool")):
-    #         param = param.to(torch_dtype)
-    #     set_module_tensor_to_device(block, param_name, "cpu", value=param, dtype=param.dtype)
+    for param_name, _ in block.named_parameters():
+        assert param_name in state_dict, f"{param_name} not in state dict"
+        param = state_dict[param_name]
+        if not str(param.dtype).startswith(("torch.uint", "torch.int", "torch.bool")):
+            param = param.to(torch_dtype)
+        set_module_tensor_to_device(block, param_name, "cpu", value=param, dtype=param.dtype)
 
-    # logger.info(f"Loaded {model_name} block {block_index}")
+    logger.info(f"Loaded {model_name} block {block_index}")
     return block # current block is WrappedLlamaBlock, and contains weights tensors
 
 
@@ -262,72 +262,72 @@ def _load_state_dict_from_local_file(path: str, *, block_prefix: Optional[str] =
         # }
 
 
-def init_weight_list(state_dict, policy, env, block):
-    dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
-    dev_choices = [env.disk, env.cpu, env.gpu]
-    print('block')
-    # import pdb; pdb.set_trace()
-    sizes=[]
-    for param_name, _ in block.named_parameters():
-        assert param_name in state_dict, f"{param_name} not in state dict"
-        param = state_dict[param_name]
-        cur_shape = np.array(param.size())
-        # print('current shape ', cur_shape)
-        cur_size = np.prod(cur_shape)
-        sizes.append(cur_size)
-        # print('current size ', cur_size)
-    # sizes=[16777216, 16777216, 16777216, 16777216, 45088768, 45088768, 45088768, 4096, 4096]  
-    sizes_cumsum = np.cumsum(sizes)   
-    # sizes_cumsum  [ 16777216  33554432  50331648  67108864 112197632 157286400 202375168 202379264 202383360]
-    # print('sizes_cumsum ', sizes_cumsum)
+# def init_weight_list(state_dict, policy, env, block):
+#     dev_percents = [policy.w_disk_percent, policy.w_cpu_percent, policy.w_gpu_percent]
+#     dev_choices = [env.disk, env.cpu, env.gpu]
+#     print('block')
+#     # import pdb; pdb.set_trace()
+#     sizes=[]
+#     for param_name, _ in block.named_parameters():
+#         assert param_name in state_dict, f"{param_name} not in state dict"
+#         param = state_dict[param_name]
+#         cur_shape = np.array(param.size())
+#         # print('current shape ', cur_shape)
+#         cur_size = np.prod(cur_shape)
+#         sizes.append(cur_size)
+#         # print('current size ', cur_size)
+#     # sizes=[16777216, 16777216, 16777216, 16777216, 45088768, 45088768, 45088768, 4096, 4096]  
+#     sizes_cumsum = np.cumsum(sizes)   
+#     # sizes_cumsum  [ 16777216  33554432  50331648  67108864 112197632 157286400 202375168 202379264 202383360]
+#     # print('sizes_cumsum ', sizes_cumsum)
     
-    ret = []
-    i=0
-    for param_name, _param in block.named_parameters():
-        mid_percent = (sizes_cumsum[i] - sizes[i] / 2) / sizes_cumsum[-1]
-        home = get_choice(mid_percent * 100, dev_percents, dev_choices)
-        # print('home ', home)
-        # print('state_dict', state_dict)
-        # print('state_dict[param_name]', state_dict[param_name])
-        # print('param_name', param_name)
-        param = state_dict[param_name]
-        # print()
-        shape = param.size()
-        dtype = param.dtype
+#     ret = []
+#     i=0
+#     for param_name, _param in block.named_parameters():
+#         mid_percent = (sizes_cumsum[i] - sizes[i] / 2) / sizes_cumsum[-1]
+#         home = get_choice(mid_percent * 100, dev_percents, dev_choices)
+#         # print('home ', home)
+#         # print('state_dict', state_dict)
+#         # print('state_dict[param_name]', state_dict[param_name])
+#         # print('param_name', param_name)
+#         param = state_dict[param_name]
+#         # print()
+#         shape = param.size()
+#         dtype = param.dtype
         
-        if len(shape) < 2:
-            pin_memory = True
-            compress = False
-        else:
-            pin_memory = policy.pin_weight
-            compress = policy.compress_weight
+#         if len(shape) < 2:
+#             pin_memory = True
+#             compress = False
+#         else:
+#             pin_memory = policy.pin_weight
+#             compress = policy.compress_weight
 
-        if not compress:
-            weight = home.allocate(shape, dtype, pin_memory=pin_memory)
-            weight.load_from_state_dict(param) ###############
-            print('weight.shape ', weight.shape)
-            if DUMMY_WEIGHT not in filename:
-                weight.load_from_np_file(weight_specs[i][2])
-            else:
-                weight.load_from_np(np.ones(shape, dtype))
-                #weight.load_from_np(np.random.rand(*shape).astype(dtype))
-        else: # compress
-            weight = home.compressed_device.allocate(
-                shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
+#         if not compress:
+#             weight = home.allocate(shape, dtype, pin_memory=pin_memory)
+#             weight.load_from_state_dict(param) ###############
+#             print('weight.shape ', weight.shape)
+#             if DUMMY_WEIGHT not in filename:
+#                 weight.load_from_np_file(weight_specs[i][2])
+#             else:
+#                 weight.load_from_np(np.ones(shape, dtype))
+#                 #weight.load_from_np(np.random.rand(*shape).astype(dtype))
+#         else: # compress
+#             weight = home.compressed_device.allocate(
+#                 shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
 
-            if DUMMY_WEIGHT not in filename:
-                # weight.load_from_np_file(weight_specs[i][2])
-                weight.load_from_state_dict(param)
-            else:
-                for i in range(2):
-                    x = weight.data[i]
-                    x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
-        i+=1
-        ret.append(weight)
-        # set_module_tensor_to_device(block, param_name, weight.device.dev, weight, value=param, dtype=param.dtype)
-        # set_module_tensor_to_device(block, param_name, "cpu", weight, value=param, dtype=param.dtype)
+#             if DUMMY_WEIGHT not in filename:
+#                 # weight.load_from_np_file(weight_specs[i][2])
+#                 weight.load_from_state_dict(param)
+#             else:
+#                 for i in range(2):
+#                     x = weight.data[i]
+#                     x.load_from_np(np.ones(x.shape, torch_dtype_to_np_dtype[x.dtype]))
+#         i+=1
+#         ret.append(weight)
+#         # set_module_tensor_to_device(block, param_name, weight.device.dev, weight, value=param, dtype=param.dtype)
+#         # set_module_tensor_to_device(block, param_name, "cpu", weight, value=param, dtype=param.dtype)
         
-        # block._parameters[tmp_name]= weight.data
+#         # block._parameters[tmp_name]= weight.data
         
      
        
@@ -347,7 +347,7 @@ def set_module_tensor_to_device(
     module: nn.Module,
     tensor_name: str,
     device: Union[int, str, torch.device],
-    weight: TorchTensor,
+    # weight: TorchTensor,
     value: Optional[torch.Tensor] = None,
     dtype: Optional[Union[str, torch.dtype]] = None,
     fp16_statistics: Optional[torch.HalfTensor] = None,

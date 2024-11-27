@@ -30,7 +30,7 @@ from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
 from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTensor, TorchDevice
 from petals.flexgen_utils.utils import ValueHolder, array_1d, array_2d, array_3d
-from petals.models.llama.flex_llama import FLEX_LlamaAttention, FLEX_LlamaMLP, LlamaDecoderLayer, InputEmbed
+from petals.models.llama.flex_llama import FLEX_LlamaAttention, FLEX_LlamaMLP, LlamaDecoderLayer
 from petals.models.llama.llama_config import get_llama_config
 from petals.flexgen_utils.task import Task
 from transformers import AutoTokenizer
@@ -146,7 +146,13 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,  # ValueHolder.val : TorchTensor.data: torch.Tensor
-        attention_mask: Optional[torch.Tensor] = None,
+        cache_read_buf: ValueHolder, #cache_read_buf[j][k],  # 
+        weight_read_buf: ValueHolder,  # weight_read_buf[j],
+        attention_mask: ValueHolder,   # attention_mask[k]
+        cache_write_buf: ValueHolder,   # cache_write_buf[j][k]
+        i: int,  # i
+        k: int,   # j
+        # attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
@@ -155,91 +161,94 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         output_attentions= False #########
         assert not output_attentions
-        # import pdb;pdb.set_trace()
-        hidden_states = hidden_states.val
-        if hidden_states:
-            hidden_states = hidden_states.data
+        
+        bsz, q_len, _ = hidden_states.val.data.size()
+        # import pdb; pdb.set_trace()
+        super().forward(
+            hidden_states,
+            cache_read_buf,
+            weight_read_buf,
+            attention_mask,
+            cache_write_buf,
+            i,
+            k
+        )
+        
+        # if position_ids is None:
+        #     past_seen_tokens = past_key_value[0].shape[2] if past_key_value is not None else 0
+        #     position_ids = torch.arange(
+        #         past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
+        #     ).unsqueeze(0)
+        # print('OptimizedLlamaAttention position_ids,', position_ids)
+        # # import pdb; pdb.set_trace()
+        # # bsz, q_len, _ = hidden_states.size()
+        # bsz, q_len, _ = hidden_states.val.data.size()
 
-        if position_ids is None:
-            past_seen_tokens = past_key_value[0].shape[2] if past_key_value is not None else 0
-            position_ids = torch.arange(
-                past_seen_tokens, 
-                past_seen_tokens + hidden_states.shape[1],
-                device=hidden_states.device
-            ).unsqueeze(0)
-        else:
-            # import pdb;pdb.set_trace()
-            position_ids = position_ids.val[0][0].data
-        print('OptimizedLlamaAttention position_ids,', position_ids)
+        # if self.config.pretraining_tp > 1:
+        #     key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+        #     query_slices = self.q_proj.weight.split(
+        #         (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
+        #     )
+        #     key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
+        #     value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
 
-        bsz, q_len, _ = hidden_states.size()
-        # bsz, q_len = hidden_states.val.data.size()
+        #     query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
+        #     query_states = torch.cat(query_states, dim=-1)
 
-        if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
-            query_slices = self.q_proj.weight.split(
-                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
-            )
-            key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
-            value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
+        #     key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
+        #     key_states = torch.cat(key_states, dim=-1)
 
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
-            query_states = torch.cat(query_states, dim=-1)
+        #     value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
+        #     value_states = torch.cat(value_states, dim=-1)
 
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
-            key_states = torch.cat(key_states, dim=-1)
+        # else:
+        #     query_states = self.q_proj(hidden_states)
+        #     key_states = self.k_proj(hidden_states)
+        #     value_states = self.v_proj(hidden_states)
 
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
-            value_states = torch.cat(value_states, dim=-1)
+        # query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        # key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        else:
-            query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
+        # cos, sin = self.rotary_emb(value_states, position_ids)
+        # cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # if q_len == 1 and torch.is_inference_mode_enabled() and hidden_states.device.type == "cuda":
+        #     query_states, key_states = self._optimized_apply_rotary(query_states, key_states, cos, sin)
+        # else:
+        #     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        cos, sin = self.rotary_emb(value_states, position_ids)
-        cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
+        # if past_key_value is not None:
+        #     # reuse k, v, self_attention
+        #     key_states = torch.cat([past_key_value[0], key_states], dim=2)
+        #     value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
-        if q_len == 1 and torch.is_inference_mode_enabled() and hidden_states.device.type == "cuda":
-            query_states, key_states = self._optimized_apply_rotary(query_states, key_states, cos, sin)
-        else:
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        # past_key_value = (key_states, value_states) if use_cache else None
 
-        if past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+        # # repeat k/v heads if n_kv_heads < n_heads
+        # key_states = repeat_kv(key_states, self.num_key_value_groups)
+        # value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        past_key_value = (key_states, value_states) if use_cache else None
+        # attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        # if attention_mask is not None:
+        #     attn_weights = attn_weights + attention_mask
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        # # upcast attention to fp32
+        # attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        # attn_output = torch.matmul(attn_weights, value_states)
 
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
+        # attn_output = attn_output.transpose(1, 2).contiguous()
+        # attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+        # if self.config.pretraining_tp > 1:
+        #     attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
+        #     o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
+        #     attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+        # else:
+        #     attn_output = self.o_proj(attn_output)
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-        else:
-            attn_output = self.o_proj(attn_output)
-
-        return attn_output, None, past_key_value
+        # return attn_output, None, past_key_value
 
 
 class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py return config.block_class(config)
@@ -273,13 +282,11 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         self.num_gpu_batches = policy.num_gpu_batches
         
         layers = []
-
-        layers.append(InputEmbed(self.llama_config, self.env, self.policy))
         layers.append(self.self_attn)
         layers.append(self.mlp)
         # layers.append(self.input_layernorm)
         # layers.append(self.post_attention_layernorm)
-
+        
         self.layers = layers
         self.num_layers = len(layers)
         # self.num_layers = 1 # current block is only one decoder layer
@@ -311,7 +318,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # self.weight_read_buf = ValueHolder()
         # attention_mask[k]
         self.attention_mask = array_1d(num_gpu_batches, ValueHolder)
-
+        print('self.attention_mask ', self.attention_mask)
         self.task = None
         print('before init_all_weights OptimizedLlamaDecoderLayer self.config', self.config)
         # Initialize weights and apply final processing
@@ -382,13 +389,13 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         gpu_batch_size = self.policy.gpu_batch_size
         left = k * gpu_batch_size
         right = left + gpu_batch_size
-        # input_ids = self.output_ids[left:right, :self.task.prompt_len]#####
+        input_ids = self.output_ids[left:right, :self.task.prompt_len]#####
 
         attention_compute = (self.env.cpu if self.policy.cpu_cache_compute
             else self.env.gpu)
         val = attention_compute.allocate(
             (self.policy.gpu_batch_size, self.task.prompt_len), bool)
-        # val.load_from_np((input_ids != self.config.pad_token_id)) #######
+        val.load_from_np((input_ids != self.config.pad_token_id)) #######
         self.attention_mask[k].store(val)
 
     def forward(
@@ -477,21 +484,22 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
                 self.cache_write_buf[j][k].clear()
         for j in range(num_layers):
             self.weight_read_buf[j].clear()
+        # import pdb; pdb.set_trace()
         for k in range(num_gpu_batches):
             self.attention_mask[k].clear()
-
+            # print('self.attention_mask[k]',self.attention_mask[k])
         self.hidden = array_3d(gen_len, num_layers, num_gpu_batches, ValueHolder)
-
+        print("hidden_states,", hidden_states)
         print("hidden_states,", list(hidden_states)[0])
         print("hidden_states device,", list(hidden_states)[0].device)
         print("hidden_states dtype,", list(hidden_states)[0].dtype)
-        print("hidden_states shape,", hidden_states.shape)
-
-        data =list(hidden_states)[0]
-        device = TorchDevice(data.device)
-        tensor_data = TorchTensor(shape=data.shape, data=data, dtype=data.dtype, device=device) 
+        data = hidden_states
+        # import pdb; pdb.set_trace()
+        device_ = TorchDevice("cuda:0")
+        tensor_data = TorchTensor(shape=data.shape, data=data, dtype=data.dtype, device=device_) 
         ### device should be TorchDevice Type instead of cuda:0 or cpu
         self.hidden[0][0][0].store(tensor_data)  
+        self.hidden[0][0][0].store(tensor_data) 
         
         # Init cache
         self.task = task
@@ -518,8 +526,12 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
 
                     for k in range(self.num_gpu_batches):
                         self.load_cache(i, j, k, overlap=False)
-                        self.load_hidden(i, j, k)
+                        if j>0 and k>0:
+                            self.load_hidden(i, j, k) # dummy input shape should be[1,32,4096]
+                        print(self.hidden[i][j][k])
+                        print('self.hidden[i][j][k]', self.hidden[i][j][k].val.data.shape)
                         self.compute_layer(i, j, k)
+                        import pdb; pdb.set_trace()
                         self.store_hidden(i, j, k)
                         self.store_cache(i, j, k, overlap=False)
                 
@@ -596,7 +608,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             with torch.cuda.stream(self.load_weight_stream):
                 self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
         else:
-            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k)
+            self.layers[j].load_weight(self.weight_home[j], self.weight_read_buf[j], k) ######
 
     def delete_weight(self, j, k):
         if k == 0:
@@ -659,6 +671,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
                 x.delete()
     
     def load_hidden(self, i, j, k):
+        # import pdb; pdb.set_trace()
         # Handle corner cases
         if k == self.num_gpu_batches:
             k = 0
@@ -670,22 +683,22 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
                 return
 
         # Load to hidden states buffers
-        dst = self.layers[j].compute
+        dst = self.layers[j].compute # .compute means the computation on this device 
         if j == 0:
             gpu_batch_size = self.policy.gpu_batch_size
             left, right = k * gpu_batch_size, (k + 1) * gpu_batch_size
-            if i == 0:  # load from the input ids
+            if i == 0:  # load from the input ids #############
                 val = dst.allocate((gpu_batch_size, self.task.prompt_len), np.int32)
                 val.load_from_np(self.output_ids[left:right, :self.task.prompt_len])
+                print('val.data.shape', val.data.shape)
             else:  # load from the last generated token
                 pos = self.task.prompt_len + i
                 val = dst.allocate((gpu_batch_size, 1), np.int32)
                 val.load_from_np(self.output_ids[left:right, pos - 1:pos])
         else:  # load from the last layer
             val = self.hidden[i][j - 1][k].pop().move(dst)
-        # import pdb;pdb.set_trace()
-        # self.hidden[i][j][k].val = None  # 重置
-        self.hidden[i][j][k].store(val)
+        # import pdb; pdb.set_trace()
+        self.hidden[i][j][k].store(val) ############
 
 
     def store_hidden(self, i, j, k):
@@ -766,7 +779,8 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
             inputs_embeds=hidden_states,
             past_key_values_length=past_key_values_length,
         )
-
+        # import pdb; pdb.set_trace()
+        # print(hidden_states)
         outputs = super().forward( ############
             hidden_states,
             *args,

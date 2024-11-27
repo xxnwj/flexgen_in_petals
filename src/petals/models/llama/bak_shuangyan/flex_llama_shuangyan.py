@@ -473,8 +473,9 @@ class FLEX_LlamaAttention(LlamaAttention):
         i,
         k
     ):
-        n_head = self.config.n_head
         import pdb; pdb.set_trace()
+        
+        n_head = self.llama_config.n_head
 
         donate = [False] * 16
         h, donate[0] = hidden.val, True
@@ -490,6 +491,8 @@ class FLEX_LlamaAttention(LlamaAttention):
         if i == 0:
             # prefill
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
+            # import pdb; pdb.set_trace()
+            # true or false means donate
             h, new_k_cache, new_v_cache = self.compute.mha_llama(h, mask, w_q, w_k, w_v, w_out,
                                        n_head, donate, self.policy.compress_cache, self.policy.comp_cache_config, input_layernorm, rotary_emb_inv_freq)
             cache_write_buf.store((new_k_cache, new_v_cache))
