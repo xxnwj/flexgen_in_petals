@@ -11,7 +11,24 @@ import torch.nn as nn
 from hivemind.utils.logging import get_logger, use_hivemind_log_handler
 from tensor_parallel.slicing_configs import get_bloom_config
 from transformers import PretrainedConfig
+from pynvml import *
 
+def see_memory_usage(message, force=True):
+	logger = ''
+	logger += message
+	nvmlInit()
+ 
+	# nvidia_smi.nvmlInit()
+	handle = nvmlDeviceGetHandleByIndex(0)
+	info = nvmlDeviceGetMemoryInfo(handle)
+	logger += "\n Nvidia-smi: " + str((info.used) / 1024 / 1024 / 1024) + " GB"
+	
+	logger += '\n    Memory Allocated: '+str(torch.cuda.memory_allocated() / (1024 * 1024 * 1024)) +'  GigaBytes\n'
+	logger +=   'Max Memory Allocated: ' + str(
+		torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)) + '  GigaBytes\n'
+	print(logger)
+
+logger = get_logger(__name__)
 use_hivemind_log_handler("in_root_logger")
 logger = get_logger(__name__)
 
@@ -52,14 +69,14 @@ def convert_block(
     # print()
     # import pdb; pdb.set_trace()
     # print()
-    
+    see_memory_usage("-----------------------------------------convert_block before make_tensor_parallel ")
     block = make_tensor_parallel(block, config, tensor_parallel_devices, output_device=output_device)
-    
+    see_memory_usage("-----------------------------------------convert_block after make_tensor_parallel ")
     if quant_type != QuantType.NONE:
         block = quantize_module(block, quant_type=quant_type)
 
-    for shard, device in zip(block.module_shards, block.devices):
-        shard.to(device)
+    # for shard, device in zip(block.module_shards, block.devices):
+    #     shard.to(device)
     # for shard, device in zip(block.modules, block.devices):
     #     shard.to(device)
     print('quant_type ', quant_type)
@@ -135,7 +152,7 @@ def make_tensor_parallel(
             logger.warning("Tensor parallelism is not tested for models other than BLOOM yet, proceed with caution")
         tp_config = None
     tp_block = tp.TensorParallel(block, devices, config=tp_config, output_device=output_device, delay_init=True)
-    print('make_tensor_parallel: tp_block ', tp_block)
+    # print('make_tensor_parallel: tp_block ', tp_block)
     # import pdb; pdb.set_trace()
     total_heads = 0
     for tp_shard in tp_block.module_shards:

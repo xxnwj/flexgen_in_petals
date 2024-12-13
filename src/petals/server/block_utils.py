@@ -71,7 +71,7 @@ def get_model_block(config, env, policy, weight_home, path, layer_idx: int = 0):
         config = PreTrainedModel._autoset_attn_implementation(config)
         return config.block_class(config, layer_idx)
     # config.block_class == WrappedLlamaBlock in distributedllamaconfig in config.py
-    print('server/block_utils.py get_model_block() : config', config)
+    # print('server/block_utils.py get_model_block() : config', config)
     res = config.block_class(config, layer_idx, env, policy, weight_home, path)  # go to block.py class OptimizedLlamaDecoderLayer
-    print(' get_model_block res  ', res)
+    # print(' get_model_block res  ', res)
     return res  # res is only nn.module without weights

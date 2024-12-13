@@ -168,10 +168,10 @@ class ValueHolder:
         # self.val = val
         if self.val is None: ####
             self.val = val ######
-            print('store  val')
+            print('valueholder store a val')
         else : ####
             self.val = val ######
-            print('update new val')
+            print('valueholder update new val')
         
 
     def pop(self):

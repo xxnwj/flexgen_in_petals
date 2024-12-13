@@ -37,6 +37,11 @@ from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchTens
 from petals.flexgen_utils.utils import ValueHolder, array_1d
 import numpy as np
 # import pdb
+
+
+
+
+
 DUMMY_WEIGHT = "_DUMMY_"  # Use dummy weights for benchmark purposes
 logger = get_logger(__name__)
 
@@ -62,14 +67,14 @@ def load_pretrained_block(
         cache_dir = DEFAULT_CACHE_DIR
     # print('server from_pretrained.py model_name ', model_name)
     # print("server from_pretrained.py model config ", config)
-
+    
     assert torch_dtype in DTYPE_MAP.values(), f"torch_dtype must be one of {list(DTYPE_MAP.values())}"
     torch_dtype = resolve_block_dtype(config, torch_dtype)
     # import pdb; pdb.set_trace()
     with init_empty_weights(): #init weights
         print('load_pretrained_block : init_empty_weights() ') 
         block = get_model_block(config, env, policy, weight_home, path, layer_idx=block_index)
-        print('block ', block)
+        # print('load pretrained block ', block)
         # import pdb; pdb.set_trace()
     # print('server from_pretrained.py:load_pretrained_block() after get_model_block  block', block)
     #### currently, the block does not contain weights yet
@@ -92,6 +97,7 @@ def load_pretrained_block(
         set_module_tensor_to_device(block, param_name, "cpu", value=param, dtype=param.dtype)
 
     logger.info(f"Loaded {model_name} block {block_index}")
+    
     return block # current block is WrappedLlamaBlock, and contains weights tensors
 
 

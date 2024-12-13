@@ -245,7 +245,7 @@ def measure_compute_rps(
         print('measure_compute_rps: dummy_input.shape', dummy_input.shape)
         # Skip the 1st step to exclude the initialization time
         def step(cache_):
-            print('step block', block)
+            print('step cache_ block', block)
             outputs = block.forward(dummy_input, use_cache=inference, layer_past=cache_ if inference else None)
             return outputs[1] if inference else None
 

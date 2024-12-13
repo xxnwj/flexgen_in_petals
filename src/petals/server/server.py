@@ -45,6 +45,23 @@ from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
 from petals.flexgen_utils.pytorch_backend import fix_recursive_import
 from petals.flexgen_utils.utils import ValueHolder, array_1d
+from pynvml import *
+
+def see_memory_usage(message, force=True):
+	logger = ''
+	logger += message
+	nvmlInit()
+ 
+	# nvidia_smi.nvmlInit()
+	handle = nvmlDeviceGetHandleByIndex(0)
+	info = nvmlDeviceGetMemoryInfo(handle)
+	logger += "\n Nvidia-smi: " + str((info.used) / 1024 / 1024 / 1024) + " GB"
+	
+	logger += '\n    Memory Allocated: '+str(torch.cuda.memory_allocated() / (1024 * 1024 * 1024)) +'  GigaBytes\n'
+	logger +=   'Max Memory Allocated: ' + str(
+		torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)) + '  GigaBytes\n'
+	print(logger)
+
 logger = get_logger(__name__)
 
 
@@ -240,9 +257,9 @@ class Server:
         ##############################################################
         self.env = ExecutionEnv.create("~./flexgen_offload_dir") ##########
         self.policy = Policy(1, 1,       #  gpu_batch_size: int, num_gpu_batches: int
-                    50, 50,              # w_gpu_percent: float, w_cpu_percent: float
-                    100, 0,             # cache_gpu_percent: float, cache_cpu_percent: float
-                    100, 0,             # act_gpu_percent: float, act_cpu_percent: float
+                    0, 100,              # w_gpu_percent: float, w_cpu_percent: float
+                    0, 100,             # cache_gpu_percent: float, cache_cpu_percent: float
+                    0, 100,             # act_gpu_percent: float, act_cpu_percent: float
                     overlap=False, sep_layer=True, pin_weight=True,
                     cpu_cache_compute=False, attn_sparsity=1.0,
                     compress_weight=False,
@@ -257,7 +274,7 @@ class Server:
         self.path = '/tmp/data/llama_weights'
         ##############################################################
         
-        
+        see_memory_usage("-----------------------------------------in server: after policy  ")
         
         assert isinstance(throughput, float) or throughput in ["auto", "eval", "dry_run"]
         if throughput in ["auto", "eval", "dry_run"]:
@@ -283,6 +300,7 @@ class Server:
                 sys.exit(0)
         else:
             throughput_info = {"throughput": throughput}
+        see_memory_usage("-----------------------------------------in server: after throughput calculation  ")
         self.server_info = ServerInfo(
             state=ServerState.JOINING,
             public_name=public_name,
@@ -526,7 +544,8 @@ class ModuleContainer(threading.Thread):
         blocks = {}
         try:
             for module_uid, block_index in zip(module_uids, block_indices):
-                # print('blocks before load_pretrained_block() ', blocks )
+                print('blocks uid before load_pretrained_block() ', module_uid )
+                see_memory_usage("-----------------------------------------before petals load pretrained block ")
                 block = load_pretrained_block(
                     converted_model_name_or_path,
                     block_index,
@@ -541,8 +560,9 @@ class ModuleContainer(threading.Thread):
                     cache_dir=cache_dir,
                     max_disk_space=max_disk_space,
                 )
-                print('block nn.module() before convert_block() ', block )
-                print('block_config' , block_config)
+                see_memory_usage("-----------------------------------------after petals load pretrained block ")
+                # print('block nn.module() before convert_block() ', block )
+                # print('block_config' , block_config)
                 block = convert_block(
                     block,     ## block configuration
                     block_index,
@@ -556,6 +576,7 @@ class ModuleContainer(threading.Thread):
                     cache_dir=cache_dir,
                     max_disk_space=max_disk_space,
                 )
+                see_memory_usage("-----------------------------------------sever: after convert_block  ")
                 blocks[module_uid] = TransformerBackend(
                     module_uid,
                     block,  ###### block instance

@@ -32,7 +32,24 @@ def fix_recursive_import():
     from petals.flexgen_utils import compression
     general_copy_compressed = compression.general_copy_compressed
     TorchCompressedDevice = compression.TorchCompressedDevice
+from pynvml import *
 
+def see_memory_usage(message, force=True):
+	logger = ''
+	logger += message
+	nvmlInit()
+ 
+	# nvidia_smi.nvmlInit()
+	handle = nvmlDeviceGetHandleByIndex(0)
+	info = nvmlDeviceGetMemoryInfo(handle)
+	logger += "\n Nvidia-smi: " + str((info.used) / 1024 / 1024 / 1024) + " GB"
+	
+	logger += '\n    Memory Allocated: '+str(torch.cuda.memory_allocated() / (1024 * 1024 * 1024)) +'  GigaBytes\n'
+	logger +=   'Max Memory Allocated: ' + str(
+		torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)) + '  GigaBytes\n'
+	print(logger)
+ 
+ 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
@@ -433,6 +450,7 @@ class TorchDevice:
         head_dim = h // n_head
         scaling = head_dim ** -0.5
         hidden = F.layer_norm(inputs.data, (h,), weight=w_ln.data, bias=b_ln.data)
+        print('mha hidden size ', hidden.shape)
         # shape: (b, s, h)
         q = F.linear(hidden, w_q.data, bias=b_q.data) * scaling
         k = F.linear(hidden, w_k.data, bias=b_k.data)
@@ -601,12 +619,14 @@ class TorchDevice:
             w_v = w_v.device.decompress(w_v)
             w_out = w_out.device.decompress(w_out)
         
-        bsz,q_len,h = hidden_states.shape   # hidden_states.shape should be   torch.Size([1, 32, 4096])
-        # 32 is the length of inputs.ids
+        bsz,q_len,h = hidden_states.shape   # hidden_states.shape should be   torch.Size([1, 1, 4096])
+        # 1 is the length of inputs.ids
         # if the length of inputs is 8, the hidden_states.shape should be torch.Size([1, 8, 4096])
+        # q_len = 8 ##########################################################################
         head_dim = h // n_head
         freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq.data)
         scaling = head_dim ** -0.5
+        import pdb; pdb.set_trace()
         hidden = rms_norm(hidden_states.data, input_layernorm.data)
         # hidden = F.layer_norm(hidden_states.data, (h,), weight=input_layernorm.data)
         
@@ -631,12 +651,12 @@ class TorchDevice:
 
         idx = torch.arange(q_len, device=self.dev)
         causal_mask = (idx <= idx.view(q_len, 1)).view(1, 1, q_len, q_len) 
-        # causal_mask.shape should be torch.Size([1, 1, 32, 32])
-        # 32 is the length of inputs.ids
+        # causal_mask.shape should be torch.Size([1, 1, 1, 1])
+        # 1 is the length of inputs.ids
         # if the length of inputs is 8, the causal_mask.shape should be torch.Size([1, 1, 8, 8])
         # import pdb; pdb.set_trace()
-        mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask # shape [1,32]
-        # mask.shape should be torch.Size([1, 1, 32, 32])
+        mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask # shape [1,1]
+        # mask.shape should be torch.Size([1, 1, 1, 1])
         
         # shape: (b, n_head, s, s)
         attn_weights = attn_weights.view(bsz, n_head, q_len, q_len)
