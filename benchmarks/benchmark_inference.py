@@ -22,7 +22,7 @@ def main():
     parser.add_argument("--initial_peers", type=str, nargs="+", default=PUBLIC_INITIAL_PEERS, help="Initial peers")
     parser.add_argument("--torch_dtype", type=str, default="float32", help="Torch dtype")
     parser.add_argument("--n_processes", type=str, default=1, help="Number of concurrent processes")
-    parser.add_argument("--seq_len", type=int, default=6, help="Sequence length")
+    parser.add_argument("--seq_len", type=int, default=1024, help="Sequence length")
     # parser.add_argument("--seq_len", type=int, default=2048, help="Sequence length")
     parser.add_argument("--warmup_steps", type=int, default=1, help="Number of warmup steps")
     

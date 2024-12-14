@@ -99,6 +99,7 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
     # def __init__(self, *args, env, policy, layer_id, **kwargs):
     #     super().__init__(*args, env, policy, layer_id, **kwargs)
         self._rotary_graph = None
+        self.temp_hidden_states = ValueHolder()
         
         # self.env = env
         # self.layer_id = layer_id
@@ -137,7 +138,7 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
         output_attentions= False #########
         assert not output_attentions
         
-        # import pdb;pdb.set_trace()
+        # 
         
         
 
@@ -155,7 +156,10 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
         
         super(OptimizedLlamaAttention, self).forward(hidden_states,cache_read_buf, weight_read_buf,attention_mask,cache_write_buf,i,k) 
         see_memory_usage("-----------------------------------------after OptimizedLlamaAttention forward ")
-        bsz, q_len, _ = hidden_states.size()
+        print('hidden_states ', hidden_states.val)
+        self.temp_hidden_states.val = hidden_states.val
+        print('self.temp_hidden_states.val ', self.temp_hidden_states.val)
+        # bsz, q_len, _ = hidden_states.size()
         # bsz, q_len = hidden_states.val.data.size()
 
         # if self.config.pretraining_tp > 1:
@@ -305,6 +309,8 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # print('OptimizedLlamaDecoderLayer self.config', self.config)
         see_memory_usage("-----------------------------------------after init_all_weights ")
         
+        self.temp_hidden = ValueHolder() ######
+        
     def set_task(self, task):
         self.task = task
         for l in self.layers:
@@ -364,7 +370,8 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
     def forward(
         self,
         hidden_states: torch.Tensor,
-        max_new_tokens: int=32, ############
+        *args,
+        max_new_tokens: int=1, ############
         do_sample: bool=True, ############
         temperature: float=0.6, ############
         stop: Optional[int] = None, ############
@@ -407,16 +414,20 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         #     read_buf1, read_buf2 = weight_read_buf.pop()
         # else:
         #     read_buf1, read_buf2 = weight_read_buf.val
-        tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b", padding_side="left")
+        # 
+        # print('args ', args)
+        # prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
+        # prompt_len, gen_len, cut_gen_len = 32, 32, 32
+        tokenizer = AutoTokenizer.from_pretrained("huggyllama/llama-7b", padding_side="left", legacy=False)
         tokenizer.pad_token = '[PAD]'
         # num_prompts = args.num_gpu_batches * args.gpu_batch_size
         num_prompts = 1
-        prompt_len, gen_len, cut_gen_len = args.prompt_len, args.gen_len, args.cut_gen_len
-        # prompt_len, gen_len, cut_gen_len = 32, 32, 32
+       
         prompt_len, gen_len, cut_gen_len = 1,1,1 ##########-------------------------------------
         inputs = get_test_inputs(prompt_len, num_prompts, tokenizer)
+        # inputs = hidden_states.cpu()
         print('inputs , ', inputs)
-        
+       
         task = Task(
             inputs=inputs,
             prompt_len=len(inputs[0]),
@@ -434,10 +445,11 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         num_prompts = len(task.inputs)
         prompt_len, gen_len = task.prompt_len, task.gen_len
         
-        
+        # import pdb; pdb.set_trace()
         # Output token ids
         self.output_ids = np.ones((num_prompts, prompt_len + gen_len), dtype=np.int64)
         print('output ids ', self.output_ids)
+        print('task.inputs ', task.inputs)
         self.output_ids[:, :prompt_len] = np.asarray(task.inputs)
         print('output ids ', self.output_ids)
         
@@ -485,24 +497,33 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
                 i = 0 ############# to simplify the woekflow, we only consider the one token each time 
                 for k in range(self.num_gpu_batches):
                     self.update_attention_mask(i, k)
+                
                 for j in range(self.num_layers):
                     for k in range(self.num_gpu_batches):
                         self.load_weight(i, j, k, overlap=False)
-
+                    
                     for k in range(self.num_gpu_batches):
                         self.load_cache(i, j, k, overlap=False)
                         # self.load_hidden(i, j, k)
+                         
+                        # if j ==1:
+                        #     print('j ==1 ', j)
+                        #     print('self.temp_hidden ', self.temp_hidden.val.data)
+                            # if self.temp_hidden.val.data:
+                            #     self.load_hidden_mlp(i, j, k)
                         
-                        self.compute_layer(i, j, k)
-                        self.store_hidden(i, j, k)
-                        self.store_cache(i, j, k, overlap=False)
+                        self.temp_hidden.val = self.compute_layer(i, j, k).data.clone()
+                        # print('self.temp_hidden ', self.temp_hidden.val.data)
+                        # import pdb; pdb.set_trace()
+                        # self.store_hidden(i, j, k)
+                        # self.store_cache(i, j, k, overlap=False)
                 
          # Delete cache
-        for j in range(num_layers):
-            for k in range(num_gpu_batches):
-                self.delete_cache(j, k)
-        if self.policy.cpu_cache_compute:
-            self.env.cpu.del_attention_compute_workspace()
+        # for j in range(num_layers):
+        #     for k in range(num_gpu_batches):
+        #         self.delete_cache(j, k)
+        # if self.policy.cpu_cache_compute:
+        #     self.env.cpu.del_attention_compute_workspace()
 
             
         # # Self Attention
@@ -530,13 +551,13 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # hidden_states = residual + hidden_states
         # print('self.hidden ')
         # print(self.hidden) # it's a default init ValueHolder, 
-        hidden_states = self.hidden.val.data
-        # self.hidden.val is a TorchTensor, the 
-        shape = self.get_shape_3d(hidden_states)  
-        print("Shape:", shape)  # Output: Shape: (32, 2, 1)  
+        hidden_states = self.temp_hidden.val.data
+        print('hidden_states --------------', hidden_states)
+        print('hidden_states.shape --------------', hidden_states.shape)
         
+        # outputs = hidden_states
         outputs = (hidden_states,)
-
+        # self.temp_hidden.store(outputs) 
         # if output_attentions:
         #     outputs += (self_attn_weights,)
 
@@ -642,7 +663,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             i += 1
             if i == self.execute_gen_len:
                 return
-        import pdb;pdb.set_trace()
+        # 
         # Load to hidden states buffers
         dst = self.layers[j].compute
         if j == 0:
@@ -662,6 +683,8 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # self.hidden[i][j][k].val = None  # 重置
         self.hidden[i][j][k].store(val)
 
+    def load_hidden_mlp(self, i, j, k):
+        self.hidden[i][j][k].store(self.temp_hidden.val)
 
     def store_hidden(self, i, j, k):
         # Handle corner cases
@@ -699,6 +722,9 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
         # Clear the cache_read_buf
         # Run layer computation
         print('compute_layer', self.hidden[i][j][k])
+        print('i, j, k  '+ str(i)+','+str(j)+','+str(k))
+        if j ==1:
+            self.hidden[i][j][k].val = self.temp_hidden.val
         print('compute_layer hidden val.data.shape', self.hidden[i][j][k].val.data.shape)
         print(self.hidden[i][j][k].val)
         print('token i', i)
@@ -713,7 +739,9 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
                                k=k, 
                                attention_mask=self.attention_mask[k], 
                                position_ids=pos_id)
-
+        self.temp_hidden.val = self.layers[j].temp_hidden_states.val
+        print('self.temp_hidden.val.data ', self.temp_hidden.val.data)
+        return self.layers[j].temp_hidden_states.val 
 #######################################################################################
 
 class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
@@ -761,14 +789,14 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
             use_cache=use_cache,
             **kwargs,
         )
-
+        print('block.py WrappedLlamaBlock forward : outputs ', outputs)
         # if use_cache:
         #     present_key_value = outputs[-1]
         #     present_key_value = self._reorder_cache_from_llama_to_bloom(
         #         present_key_value, batch_size, seq_length_with_past
         #     )
         #     outputs = outputs[:-1] + (present_key_value,)
-
+        import pdb;pdb.set_trace()
         return outputs
 
     def _reorder_cache_from_bloom_to_llama(
@@ -798,8 +826,8 @@ def get_test_inputs(prompt_len, num_prompts, tokenizer):
     prompts = [
         # "Simply put, the theory of relativity states that ",
 
-        "I believe the meaning of life is",
-
+        # "I believe the meaning of life is",
+        "",
         # """Translate English to French:
         # sea otter => loutre de mer
         # peppermint => menthe poivrée

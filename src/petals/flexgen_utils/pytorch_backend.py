@@ -626,7 +626,7 @@ class TorchDevice:
         head_dim = h // n_head
         freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq.data)
         scaling = head_dim ** -0.5
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         hidden = rms_norm(hidden_states.data, input_layernorm.data)
         # hidden = F.layer_norm(hidden_states.data, (h,), weight=input_layernorm.data)
         
@@ -921,7 +921,7 @@ class TorchDevice:
         out = F.linear(act_fn(F.linear(src_out, gate.data)) * F.linear(src_out, up.data), down.data)
 
         out.add_(inputs.data)
-        if donate[0]: inputs.delete()
+        # if donate[0]: inputs.delete()
         return TorchTensor.create_from_torch(out, self)
 
     def synchronize(self):

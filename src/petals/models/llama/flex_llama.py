@@ -515,11 +515,12 @@ class FLEX_LlamaAttention(LlamaAttention):
 
         if i == 0:
             # prefill
-            # import pdb;pdb.set_trace()
+            # import pdb;pdb.set_trace()---------------------
             mask, donate[1] = attention_mask.val.smart_copy(self.compute)
             h, new_k_cache, new_v_cache = self.compute.mha_llama(h, mask, w_q, w_k, w_v, w_out,
                                        n_head, donate, self.policy.compress_cache, self.policy.comp_cache_config, input_layernorm, rotary_emb_inv_freq)
             cache_write_buf.store((new_k_cache, new_v_cache))
+            
         else:
             # decoding
             mask, donate[1] = attention_mask.val.smart_copy(self.attention_compute)
@@ -534,6 +535,8 @@ class FLEX_LlamaAttention(LlamaAttention):
             cache_write_buf.store((new_k_cache, new_v_cache))
 
         hidden.val = h
+        
+        return h
 
 class FLEX_LlamaMLP(LlamaMLP):
     def __init__(
@@ -554,6 +557,7 @@ class FLEX_LlamaMLP(LlamaMLP):
                                 else self.compute)
 
         self.task = None
+        self.temp_hidden_states = ValueHolder()
 
     def set_task(self, task):
         self.task = task
@@ -605,17 +609,17 @@ class FLEX_LlamaMLP(LlamaMLP):
         return (batch_size, seq_len, self.config.input_dim), self.config.dtype
 
     def forward(self, 
-        x,
+        hidden_states,
         cache_read_buf,
         weight_read_buf,
         attention_mask,
         cache_write_buf,
-        i=0,
+        position_ids,
         k: int = 0
         ):
         donate = [False] * 9
-        h, donate[0] = x.val, True
-
+        h, donate[0] = hidden_states.val, True
+        print('flex_llama.py MLP forward function  mlp h ,',  h)
         if k == self.policy.num_gpu_batches - 1:
             # Clear the weight_read_buf if it is the last gpu batch
             ((gate, donate[1]), (down, donate[3]),
@@ -625,8 +629,10 @@ class FLEX_LlamaMLP(LlamaMLP):
              (up, _), (post_attention_layernorm, _)) = weight_read_buf.val
 
         h = self.compute.mlp_llama(h, gate, down, up, donate, self.config, post_attention_layernorm)
-        x.val = h
-
+        hidden_states.val = h
+        print('flex_llama.py MLP forward function  h,',  h)
+        self.temp_hidden_states.val=h
+        return h
 
 
 
