@@ -108,7 +108,7 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
         with self._peft_module.using_adapter(active_adapter):
             return super().backward(*inputs)
 
-    @torch.inference_mode() # 进入推理模式，不会计算梯度，从而节省内存 
+    @torch.inference_mode() # 进入推理模式，不计算梯度，从而节省内存 
     def inference_step( # 每一个block都会执行一次, 
         self,
         hidden_states: torch.Tensor,  # 输入的隐藏状态张量 
@@ -135,16 +135,21 @@ class TransformerBackend(ModuleBackend): # hivemind: ModuleBackend.module: nn.Mo
                 hidden_states_chunk = hidden_states[:, offset : offset + max_chunk_length, :] # 获取当前的隐藏状态块 
                 print('transformer backend inference step() offset ', offset )
                 print('transformer backend inference step() offset + max_chunk_length',  (offset + max_chunk_length))
-                output_hidden_states_chunk, new_kvs = self.module.forward(
-                    hidden_states_chunk, layer_past=layer_past, use_cache=True # 前向传播，返回新的键值状态  
+                # output_hidden_states_chunk, new_kvs = self.module.forward(
+                #     hidden_states_chunk, layer_past=layer_past, use_cache=True # 前向传播，返回新的键值状态  
+                # )
+                output_hidden_states_chunk,= self.module.forward(
+                    hidden_states_chunk, layer_past=layer_past, use_cache=False # 前向传播，返回新的键值状态  
                 )
                 if seq_len > max_chunk_length:
                     output_hidden_states[:, offset : offset + max_chunk_length] = output_hidden_states_chunk # 存储输出
                 else:
                     output_hidden_states = output_hidden_states_chunk  # saves one memcopy # 仅复制一次内存
-                layer_past = new_kvs # 更新缓存状态
+                # layer_past = new_kvs # 更新缓存状态
 
-            self._update_cache_inplace(cache_tensors, new_kvs, inference_info.prefix_length) # 更新缓存 
+            # self._update_cache_inplace(cache_tensors, new_kvs, inference_info.prefix_length) # 更新缓存 
+            # import pdb;pdb.set_trace()
+            print('backend.py output_hidden_states ', output_hidden_states)
             return (output_hidden_states,) # 返回输出的隐藏状态
 
     def _estimate_max_chunk_length(self, hidden_states: torch.Tensor, inference_info: InferenceMetadata) -> int:
@@ -239,4 +244,5 @@ class _MergedInferenceStep:
                 hidden_states[:, : optional_prompt.shape[1]] += optional_prompt
             print('............... come into the _MergedInferenceStep __call__ inference_info.uid ', inference_info.uid)
             (hidden_states,) = self.backends[inference_info.uid].inference_step(hidden_states, hypo_ids, inference_info)
+        # import pdb; pdb.set_trace()
         return (hidden_states,)

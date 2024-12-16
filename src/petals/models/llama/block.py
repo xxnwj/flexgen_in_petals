@@ -159,6 +159,7 @@ class OptimizedLlamaAttention(FLEX_LlamaAttention):
         print('hidden_states ', hidden_states.val)
         self.temp_hidden_states.val = hidden_states.val
         print('self.temp_hidden_states.val ', self.temp_hidden_states.val)
+        return self.temp_hidden_states.val,  None, None # petals :attn_output, None, past_key_value
         # bsz, q_len, _ = hidden_states.size()
         # bsz, q_len = hidden_states.val.data.size()
 
@@ -563,7 +564,7 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
 
         # if use_cache:
         #     outputs += (present_key_value,)
-
+        print('decoderlayer outputs.shape --------------', outputs)
         return outputs
     
     def get_shape_3d(self, lst):  
@@ -790,13 +791,15 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
             **kwargs,
         )
         print('block.py WrappedLlamaBlock forward : outputs ', outputs)
+        print('use_cache', use_cache)
+        # use_cache
         # if use_cache:
         #     present_key_value = outputs[-1]
         #     present_key_value = self._reorder_cache_from_llama_to_bloom(
         #         present_key_value, batch_size, seq_length_with_past
         #     )
         #     outputs = outputs[:-1] + (present_key_value,)
-        import pdb;pdb.set_trace()
+        
         return outputs
 
     def _reorder_cache_from_bloom_to_llama(
