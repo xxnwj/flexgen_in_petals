@@ -13,6 +13,22 @@ from petals import AutoDistributedModelForCausalLM
 from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
 
 logger = get_logger()
+from pynvml import *
+
+def see_memory_usage(message, force=True):
+	logger = ''
+	logger += message
+	nvmlInit()
+ 
+	# nvidia_smi.nvmlInit()
+	handle = nvmlDeviceGetHandleByIndex(0)
+	info = nvmlDeviceGetMemoryInfo(handle)
+	logger += "\n Nvidia-smi: " + str((info.used) / 1024 / 1024 / 1024) + " GB"
+	
+	logger += '\n    Memory Allocated: '+str(torch.cuda.memory_allocated() / (1024 * 1024 * 1024)) +'  GigaBytes\n'
+	logger +=   'Max Memory Allocated: ' + str(
+		torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024)) + '  GigaBytes\n'
+	print(logger)
 
 
 def main():
@@ -58,7 +74,7 @@ def benchmark_inference(process_idx, args, result_pipe):
     logger.info(f"Created model: {process_idx=} {model.device=}")
 
     time_start_log = perf_counter()
-    print('benchmark inference model ', model)
+    # print('benchmark inference model ', model)
     
     result = ""
     step_times = []
@@ -81,3 +97,4 @@ def benchmark_inference(process_idx, args, result_pipe):
 
 if __name__ == "__main__":
     main()
+    see_memory_usage("-----------------------------------------after inference  ")

@@ -335,13 +335,13 @@ class InferenceSession:
 
                     server_session = self._server_sessions[server_idx]
                     assert server_session.position == self.position, f"{server_session.position} and {self.position}"
-                    inputs = server_session.step( # 调用服务器会话的 step 方法，处理输入、提示和假设 ID，并传入步骤 ID。
+                    inputs = server_session.step( 
                         inputs,
                         prompts[server_session.span.start : server_session.span.end],
                         hypo_ids,
                         step_id=step_id,
                     )
-                    print('inputs ', inputs)
+                    # print('inputs ', inputs)
                     print('inputs.shape ', inputs.shape)
                     server_idx += 1
                     block_idx = server_session.span.end
@@ -358,23 +358,23 @@ class InferenceSession:
                         f"Caught exception when running inference via {server_session.span if server_session is not None else None} "
                         f"(retry in {delay:.0f} sec): {repr(e)}"
                     )
-                    maybe_log_traceback(e) # 可能记录异常的回溯信息。 
-                    time.sleep(delay) #等待重试延迟时间后重试
+                    maybe_log_traceback(e)  
+                    time.sleep(delay) 
 
-        self._position += n_input_tokens # 更新当前的位置
-        outputs = inputs[:, -n_input_tokens:] # 从输入中提取最后的 n_input_tokens 作为输出。
+        self._position += n_input_tokens 
+        outputs = inputs[:, -n_input_tokens:] 
         outputs = outputs.to(device=inputs_device, dtype=inputs_dtype) 
         print('client inference session outputs ', outputs.shape)
         return outputs
 
-    # 处理服务器会话的更新，确保在服务器故障的情况下能够重新生成必要的序列，并维护会话之间的链接，以支持高效的远程通信。
+    
     def _update_sequence(self, server_idx: int, block_idx: int, attempt_no: int) -> int:
         # If there is a failed server session, this code closes it
         self._exit_server_sessions(self._server_sessions[server_idx : server_idx + 1])
 
         n_prev_spans = len(self._server_sessions)
         update_end = self._server_sessions[server_idx].span.end if server_idx < n_prev_spans else self.num_blocks
-        if attempt_no >= 1: #如果尝试次数大于等于 1，记录调试信息，说明由于服务器故障，从 block_idx 到 update_end 的远程注意缓存将被重新生成
+        if attempt_no >= 1: 
             logger.debug(
                 f"Due to a server failure, remote attention caches "
                 f"from block {block_idx} to {update_end} will be regenerated"
@@ -382,13 +382,13 @@ class InferenceSession:
 
         updated_spans = self._sequence_manager.make_sequence(
             block_idx, update_end, mode="min_latency", cache_tokens_needed=self._max_length
-        )# 调用 _sequence_manager 的 make_sequence 方法，生成新的序列，参数包括当前块索引、更新结束位置、模式（最小延迟）和所需的缓存令牌数量。
+        )
 
         # make_sequence() could return a longer sequence
         updated_spans[-1].end = min(updated_spans[-1].end, update_end)
         updated_sessions = self._enter_server_sessions(updated_spans)
         logger.debug(f"Found path from block {block_idx} to {update_end} via {len(updated_spans)} servers")
-        # 记录调试信息，显示从 block_idx 到 update_end 的路径通过了多少个服务器。
+        
         
         # If there is a failed span, this code replaces it, otherwise it just adds new ones
         if server_idx < n_prev_spans:
