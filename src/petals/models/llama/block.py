@@ -4,8 +4,8 @@ Based on https://github.com/huggingface/transformers/blob/main/src/transformers/
 See commit history for authorship.
 """
 import math
-from typing import Optional, Tuple
-
+from typing import Optional, Tuple, Dict
+import uuid
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,7 +24,7 @@ from transformers.models.llama.modeling_llama import (
 
 import numpy as np
 from petals.utils.cuda_graphs import make_inference_graphed_callable
-# from petals.flexgen_utils.utils import ExecutionEnv
+import petals.flexgen_utils
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
@@ -751,6 +751,60 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
 #######################################################################################
 
 class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        layer_id: int,
+        env: ExecutionEnv,
+        policy: Policy,
+        weight_home: Dict[str, TorchTensor],
+        path: str,
+        device_map: Optional[Dict[str, str]] = None,
+        compression_config: Optional[CompressionConfig] = None,
+        **kwargs
+    ):
+
+        super().__init__(
+            config=config,
+            layer_id=layer_id,
+            env=env,
+            policy=policy,
+            weight_home=weight_home,
+            path=path,
+            **kwargs
+        )
+
+
+        
+        self.compression_config = compression_config
+        
+        self.offload_enabled = any(
+            device in ["cpu", "disk"] 
+            for device in self.device_map.values()
+        )
+
+        self.weight_home = weight_home
+        self.path = path
+        
+        self.env = env
+        self.policy = policy
+        self.device_map = device_map or {
+            "input": "cuda",
+            "output": "cuda",
+            "weights": "cuda",
+            "cache": "cuda"
+        }
+        self.disk_cache_dir = os.path.join(path, "disk_cache")
+        os.makedirs(self.disk_cache_dir, exist_ok=True)
+        self.disk_cache = {}
+
+
+        print(f"Initialized WrappedLlamaBlock layer {layer_id} with:")
+        print(f"  - device_map: {self.device_map}")
+        print(f"  - compression: {self.compression_config}")
+        print(f"  - offload_enabled: {self.offload_enabled}")
+
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -761,8 +815,14 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
         use_cache: bool = False,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        batch_size, seq_length, _ = hidden_states.shape
+        if self.offload_enabled:
+            hidden_states = self._move_to_device(hidden_states, "input")
+            if attention_mask is not None:
+                attention_mask = self._move_to_device(attention_mask, "input")
+            if layer_past is not None:
+                layer_past = tuple(self._move_to_device(t, "cache") for t in layer_past)
 
+        batch_size, seq_length, _ = hidden_states.shape
         seq_length_with_past = seq_length
         past_key_values_length = 0
 
@@ -786,7 +846,12 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
             past_key_values_length=past_key_values_length,
         )
 
-        outputs = super().forward( ############
+        # 处理权重offloading
+        if self.offload_enabled:
+            self._offload_weights()
+
+        # 执行前向计算
+        outputs = super().forward(
             hidden_states,
             *args,
             attention_mask=attention_mask,
@@ -795,17 +860,58 @@ class WrappedLlamaBlock(OptimizedLlamaDecoderLayer):
             use_cache=use_cache,
             **kwargs,
         )
-        print('block.py WrappedLlamaBlock forward : outputs ', outputs)
-        print('use_cache', use_cache)
-        # use_cache
-        # if use_cache:
-        #     present_key_value = outputs[-1]
-        #     present_key_value = self._reorder_cache_from_llama_to_bloom(
-        #         present_key_value, batch_size, seq_length_with_past
-        #     )
-        #     outputs = outputs[:-1] + (present_key_value,)
-        
+
+        # 处理输出offloading
+        if self.offload_enabled:
+            if isinstance(outputs, tuple):
+                outputs = tuple(
+                    self._move_to_device(t, "output") if t is not None else t
+                    for t in outputs
+                )
+            else:
+                outputs = self._move_to_device(outputs, "output")
+
         return outputs
+
+    def _move_to_device(self, tensor: torch.Tensor, tensor_type: str) -> torch.Tensor:
+        device = self.device_map.get(tensor_type, "cuda")
+        
+        if device == "disk":
+            return self._move_to_disk(tensor)
+        return tensor.to(device)
+
+
+    def _move_to_disk(self, tensor: torch.Tensor) -> torch.Tensor:
+        file_id = str(uuid.uuid4())
+        file_path = os.path.join(self.disk_cache_dir, f"{file_id}.pt")
+        
+        torch.save(tensor.cpu(), file_path)
+        self.disk_cache[file_path] = {
+            'shape': tensor.shape,
+            'dtype': tensor.dtype,
+            'device': tensor.device
+        }
+        return torch.empty(0, device='meta')
+
+
+    def _load_from_disk(self, file_path: str) -> torch.Tensor:
+        if file_path not in self.disk_cache:
+            raise ValueError(f"File {file_path} not found in disk cache")
+        
+        tensor = torch.load(file_path)
+        
+        device = self.disk_cache[file_path]['device']
+        return tensor.to(device)
+
+
+    def _offload_weights(self):
+        """处理权重offloading"""
+        for name, param in self.named_parameters():
+            device = self.device_map.get(f"weight_{name}", "cuda")
+            if device == "disk":
+                param.data = self._move_to_disk(param.data)
+            else:
+                param.data = param.data.to(device)
 
     def _reorder_cache_from_bloom_to_llama(
         self, key_value: Tuple[torch.Tensor], batch_size: int, seq_length: int
