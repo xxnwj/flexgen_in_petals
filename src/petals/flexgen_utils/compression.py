@@ -30,7 +30,7 @@ class TorchCompressedDevice:
         self.data_decompress_workspace = None
         self.workspace_pt = 0
 
-    def allocate(self, shape, dtype, comp_config, pin_memory=None, name=None):
+    def allocate(self, shape, dtype, comp_config, pin_memory=None, name=None, seg_lengths=None):
         """Allocate a compressed TorchTensor. Round up the shape to group boundary."""
         assert comp_config.num_bits == 4 and dtype == np.float16
 
@@ -43,15 +43,39 @@ class TorchCompressedDevice:
         scale_shape = (
             shape[:group_dim] + (num_groups, 2) + shape[group_dim+1:])
 
-        data = self.base_device.allocate(data_shape, np.uint8, pin_memory=pin_memory)
-        scale = self.base_device.allocate(scale_shape, np.float16, pin_memory=pin_memory)
+        if seg_lengths is not None:
+            if sum(seg_lengths) != shape[0]:
+                seg_lengths = [shape[0] // len(seg_lengths)] * len(seg_lengths)
+                seg_lengths[-1] += shape[0] % len(seg_lengths)  # 处理余数
+        else:
+            seg_lengths = [shape[0]]
+
+        try:
+            # 确保data_shape和scale_shape的seg_lengths与shape[0]匹配
+            data_seg_lengths = [s * (num_groups * (group_size // 2)) // shape[0] for s in seg_lengths]
+            scale_seg_lengths = [s * num_groups // shape[0] for s in seg_lengths]
+
+            data = self.base_device.allocate(data_shape, np.uint8, pin_memory=pin_memory, seg_lengths=data_seg_lengths)
+            scale = self.base_device.allocate(scale_shape, np.float16, pin_memory=pin_memory, seg_lengths=scale_seg_lengths)
+        except TypeError:
+            # 如果base_device不支持seg_lengths，回退到默认分配方式
+            data = self.base_device.allocate(data_shape, np.uint8, pin_memory=pin_memory)
+            scale = self.base_device.allocate(scale_shape, np.float16, pin_memory=pin_memory)
 
         return TorchTensor(shape, np_dtype_to_torch_dtype[dtype],
-                           (data, scale, comp_config), self, name=name)
+                        (data, scale, comp_config), self, name=name)
 
     def init_cache_one_gpu_batch(self, config, task, policy):
+        print(f"slog>>> config: {config}")
+        num_heads = config.num_attention_heads
+        input_dim = config.hidden_size
+        if not isinstance(num_heads, int) or num_heads <= 0:
+            raise ValueError(f"Invalid num_attention_heads: {num_heads}")
+        if not isinstance(input_dim, int) or input_dim <= 0:
+            raise ValueError(f"Invalid hidden_size: {input_dim}")
+
         num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
-            config.n_head, config.input_dim, task.prompt_len, task.gen_len,
+            num_heads, input_dim, task.prompt_len, task.gen_len,
             policy.gpu_batch_size)
         shape = (prompt_len + gen_len - 1, gpu_batch_size * num_head, hidden_size // num_head)
         # NOTE: disable pin_memory due to high memory overhead

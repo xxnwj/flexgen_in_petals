@@ -43,7 +43,7 @@ from petals.utils.version import get_compatible_model_repo
 from petals.flexgen_utils.ExecutionEnv import ExecutionEnv
 from petals.flexgen_utils.compression import CompressionConfig
 from petals.flexgen_utils.policy import Policy
-from petals.flexgen_utils.pytorch_backend import fix_recursive_import
+from petals.flexgen_utils.pytorch_backend import fix_recursive_import, TorchDevice, TorchDisk, TorchMixedDevice
 from petals.flexgen_utils.utils import ValueHolder, array_1d
 from pynvml import *
 
@@ -257,19 +257,19 @@ class Server:
         ##############################################################
         self.env = ExecutionEnv.create("~./flexgen_offload_dir") ##########
         self.policy = Policy(1, 1,       #  gpu_batch_size: int, num_gpu_batches: int
-                    0, 100,              # w_gpu_percent: float, w_cpu_percent: float
-                    0, 100,             # cache_gpu_percent: float, cache_cpu_percent: float
+                    30, 70,              # w_gpu_percent: float, w_cpu_percent: float
+                    20, 80,             # cache_gpu_percent: float, cache_cpu_percent: float
                     100, 0,             # act_gpu_percent: float, act_cpu_percent: float
-                    overlap=False, sep_layer=True, pin_weight=True,
-                    cpu_cache_compute=False, attn_sparsity=1.0,
-                    compress_weight=False,
+                    overlap=True, sep_layer=True, pin_weight=True,
+                    cpu_cache_compute=True, attn_sparsity=1.0,
+                    compress_weight=True,
                     comp_weight_config=CompressionConfig(
-                        num_bits=4, group_size=64,
-                        group_dim=0, symmetric=False),
-                    compress_cache=False,
+                    num_bits=4, group_size=64,
+                    group_dim=0, symmetric=False),
+                    compress_cache=True,
                     comp_cache_config=CompressionConfig(
-                        num_bits=4, group_size=64,
-                        group_dim=2, symmetric=False))
+                    num_bits=4, group_size=64,
+                    group_dim=2, symmetric=True))
         self.weight_home = array_1d(self.num_blocks, ValueHolder)
         self.path = '/tmp/data/llama_weights'
         ##############################################################

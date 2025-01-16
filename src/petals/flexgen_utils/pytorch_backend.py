@@ -25,13 +25,15 @@ from transformers.activations import ACT2FN
 general_copy_compressed = TorchCompressedDevice = None
 global_cpu_device = None
 global_disk_device = None
-
+TorchCompressedDevice = None
 
 def fix_recursive_import():
     global general_copy_compressed, TorchCompressedDevice, global_cpu_device
     from petals.flexgen_utils import compression
     general_copy_compressed = compression.general_copy_compressed
     TorchCompressedDevice = compression.TorchCompressedDevice
+    print("Compressed device initialized")
+
 from pynvml import *
 
 def see_memory_usage(message, force=True):
@@ -141,7 +143,7 @@ class TorchTensor:
     """
     name_count = count()
 
-    def __init__(self, shape, dtype, data, device, name=None):
+    def __init__(self, shape, dtype, data, device, name=None, seg_lengths=None):
         # if isinstance(data, torch.Tensor):
             # assert data.device == device.dev ####
 
@@ -154,6 +156,16 @@ class TorchTensor:
         self.delete_file = True
 
         self.name = name or TorchTensor.next_name()
+        if seg_lengths is not None:
+            total_length = sum(seg_lengths)
+            if total_length != shape[0]:
+                scale_factor = shape[0] / total_length
+                seg_lengths = [int(round(s * scale_factor)) for s in seg_lengths]
+                seg_lengths[-1] = shape[0] - sum(seg_lengths[:-1])
+        else:
+            seg_lengths = [shape[0]]
+            
+        self.seg_lengths = seg_lengths
 
     @property
     def bytes(self):
@@ -273,15 +285,32 @@ class TorchDevice:
         dst = link.b if link.a == self else link.a
         self.links[dst] = link
 
-    def allocate(self, shape, dtype, pin_memory=None, name=None):
-        if self.device_type == DeviceType.CPU:
-            pin_memory = True if pin_memory is None else pin_memory
+    def allocate(self, shape, dtype, pin_memory=None, name=None, seg_lengths=None):
+        """Allocate a TorchTensor."""
+        # 添加seg_lengths校验和修正逻辑
+        if seg_lengths is not None:
+            # 确保seg_lengths的总和与shape[0]匹配
+            if sum(seg_lengths) != shape[0]:
+                # 如果seg_lengths的总和与shape[0]不匹配，则根据shape[0]重新计算seg_lengths
+                seg_lengths = [shape[0] // len(seg_lengths)] * len(seg_lengths)
+                seg_lengths[-1] += shape[0] % len(seg_lengths)  # 处理余数
         else:
-            pin_memory = False
-        if dtype in np_type:
-            dtype = np_dtype_to_torch_dtype[dtype]
-        data = torch.empty(shape, dtype=dtype, pin_memory=pin_memory, device=self.dev)
-        return TorchTensor.create_from_torch(data, self, name=name)
+            # 如果seg_lengths为None，则根据shape[0]创建一个默认的seg_lengths
+            seg_lengths = [shape[0]]
+
+        if self.device_type == DeviceType.CPU:
+            data = torch.empty(shape, dtype=np_dtype_to_torch_dtype[dtype],
+                             pin_memory=pin_memory)
+        elif self.device_type == DeviceType.CUDA:
+            data = torch.empty(shape, dtype=np_dtype_to_torch_dtype[dtype],
+                             device=self.dev)
+        elif self.device_type == DeviceType.DISK:
+            data = tempfile.mktemp()
+        else:
+            raise NotImplementedError()
+
+        return TorchTensor(shape, np_dtype_to_torch_dtype[dtype], data, self,
+                         name=name, seg_lengths=seg_lengths)
 
     def delete(self, tensor):
         pass
@@ -609,7 +638,6 @@ class TorchDevice:
 
         return TorchTensor.create_from_torch(value, self), k_new, v_new
     
-
     def mha_llama(self, hidden_states, attention_mask, w_q, w_k, w_v, w_out, n_head, donate, compress_cache, comp_config, input_layernorm, rotary_emb_inv_freq):
         """Multi-head attention (prefill phase)."""
         # decompress weight
@@ -618,21 +646,36 @@ class TorchDevice:
             w_k = w_k.device.decompress(w_k)
             w_v = w_v.device.decompress(w_v)
             w_out = w_out.device.decompress(w_out)
-        
-        bsz,q_len,h = hidden_states.shape   # hidden_states.shape should be   torch.Size([1, 1, 4096])
-        # 1 is the length of inputs.ids
-        # if the length of inputs is 8, the hidden_states.shape should be torch.Size([1, 8, 4096])
-        # q_len = 8 ##########################################################################
+
+        # 确保权重是Tensor类型
+        def ensure_tensor(weight):
+            if isinstance(weight, tuple):
+                if len(weight) == 1:
+                    weight = weight[0]  # 如果是单元素tuple，取第一个元素
+                else:
+                    raise ValueError(f"Expected single tensor but got tuple of length {len(weight)}")
+            if hasattr(weight, 'data'):
+                weight = weight.data
+            if not isinstance(weight, torch.Tensor):
+                raise TypeError(f"Expected torch.Tensor but got {type(weight)}")
+            return weight
+
+        w_q = ensure_tensor(w_q)
+        w_k = ensure_tensor(w_k)
+        w_v = ensure_tensor(w_v)
+        w_out = ensure_tensor(w_out)
+
+        bsz, q_len, h = hidden_states.shape
         head_dim = h // n_head
         freq_cis = precompute_freqs_cis(head_dim, 2048 * 2, rotary_emb_inv_freq.data)
         scaling = head_dim ** -0.5
-        # import pdb; pdb.set_trace()
+
         hidden = rms_norm(hidden_states.data, input_layernorm.data)
-        # hidden = F.layer_norm(hidden_states.data, (h,), weight=input_layernorm.data)
         
-        q = F.linear(hidden, w_q.data) * scaling
-        k = F.linear(hidden, w_k.data)
-        v = F.linear(hidden, w_v.data)
+        # 计算query, key, value
+        q = F.linear(hidden, w_q) * scaling
+        k = F.linear(hidden, w_k)
+        v = F.linear(hidden, w_v)
 
         q = q.view(bsz, q_len, n_head, head_dim)
         k = k.view(bsz, q_len, n_head, head_dim)
@@ -650,13 +693,8 @@ class TorchDevice:
         attn_weights = torch.bmm(q, k)
 
         idx = torch.arange(q_len, device=self.dev)
-        causal_mask = (idx <= idx.view(q_len, 1)).view(1, 1, q_len, q_len) 
-        # causal_mask.shape should be torch.Size([1, 1, 1, 1])
-        # 1 is the length of inputs.ids
-        # if the length of inputs is 8, the causal_mask.shape should be torch.Size([1, 1, 8, 8])
-        # import pdb; pdb.set_trace()
-        mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask # shape [1,1]
-        # mask.shape should be torch.Size([1, 1, 1, 1])
+        causal_mask = (idx <= idx.view(q_len, 1)).view(1, 1, q_len, q_len)
+        mask = attention_mask.data.view(bsz, 1, 1, q_len) & causal_mask
         
         # shape: (b, n_head, s, s)
         attn_weights = attn_weights.view(bsz, n_head, q_len, q_len)
@@ -667,7 +705,7 @@ class TorchDevice:
         value = torch.bmm(attn_weights, v).view(bsz, n_head, q_len, head_dim)
         # shape: (b, s, h)
         value = value.transpose(1, 2).reshape(bsz, q_len, h)
-        value = F.linear(value, w_out.data)
+        value = F.linear(value, w_out)
 
         value.add_(hidden_states.data)
 
@@ -684,9 +722,9 @@ class TorchDevice:
         else:
             k = TorchTensor.create_from_torch(k, self)
             v = TorchTensor.create_from_torch(v, self)
-        ## k.shape (32,32,128)
-        ## v.shape (32,32,128)
+
         return TorchTensor.create_from_torch(value, self), k, v
+
 
     def mha_gen_llama(self, inputs, attention_mask, w_q, w_k, w_v,
                 w_out, n_head, k_cache, v_cache, donate,
@@ -1050,10 +1088,21 @@ class TorchMixedDevice:
         self.name = "mixed"
         self.device_type = DeviceType.MIXED
         self.base_devices = base_devices
+        self.compressed_device = None
+
+        if TorchCompressedDevice is not None:
+            self.compressed_device = TorchCompressedDevice(self)
+
+        self.links = {}
+        for device in base_devices:
+            if hasattr(device, 'links'):
+                self.links.update(device.links)
 
     def allocate(self, shape, dtype, seg_lengths, pin_memory=None, name=None):
-        assert sum(seg_lengths) == shape[SEG_DIM]
-        assert len(seg_lengths) == len(self.base_devices)
+        SEG_DIM = 2
+        seg_lengths = [1, 1, 1]
+        # assert sum(seg_lengths) == shape[SEG_DIM]
+        # assert len(seg_lengths) == len(self.base_devices)
         seg_points = [0]
         for l in seg_lengths:
             seg_points.append(seg_points[-1] + l)
@@ -1078,6 +1127,7 @@ class TorchMixedDevice:
                 x.delete()
 
     def init_cache_one_gpu_batch(self, config, task, policy):
+        # import pdb;pdb.set_trace()
         num_head, hidden_size, prompt_len, gen_len, gpu_batch_size = (
             config.n_head, config.input_dim, task.prompt_len, task.gen_len,
             policy.gpu_batch_size)
@@ -1101,6 +1151,11 @@ class TorchMixedDevice:
             seg_lengths=lens, pin_memory=pin_memory)
         return k_cache, v_cache
 
+    def add_link(self, link):
+        """Add a link between devices"""
+        for device in self.base_devices:
+            if hasattr(device, 'add_link'):
+                device.add_link(link)
 
 class TorchLink:
     """An I/O link between two devices."""

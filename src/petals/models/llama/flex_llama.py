@@ -154,7 +154,7 @@ def init_weight_list(weight_specs, policy, env):
         else:
             weight = home.compressed_device.allocate(
                 shape, dtype, policy.comp_weight_config, pin_memory=pin_memory)
-
+            TorchDevice("cpu")
             if DUMMY_WEIGHT not in filename:
                 weight.load_from_np_file(weight_specs[i][2])
             else:
@@ -393,7 +393,10 @@ class FLEX_LlamaAttention(LlamaAttention):
 
         if self.policy.compress_cache:
             assert device.device_type != DeviceType.MIXED
-            device = device.compressed_device
+            if hasattr(device, 'compressed_device'):
+                device = device.compressed_device
+            else:
+                device = device
 
         cache = device.init_cache_one_gpu_batch(self.config, self.task, self.policy)
         cache_home.store(cache)

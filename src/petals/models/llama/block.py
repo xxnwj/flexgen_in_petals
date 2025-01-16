@@ -323,16 +323,16 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
             self.init_weight(j)
             
     def init_weight(self, j):
-        # print('self.llama_config ', self.llama_config)
         expanded_path = os.path.abspath(os.path.expanduser(
             os.path.join(self.path, f"{self.llama_config.name}-np")))
         check_path = os.path.join(expanded_path, "embed_tokens.weight")
         if not os.path.exists(check_path) and DUMMY_WEIGHT not in check_path:
+            print(f"Downloading weights for layer {j}...")
             download_llama_weights(self.llama_config.name, self.path)
+        # 添加权重加载验证
+        if not os.path.exists(check_path):
+            raise FileNotFoundError(f"Weight file not found: {check_path}")
         self.layers[j].init_weight(self.weight_home[j], expanded_path)
-        
-    
-    
     
     
     def _optimized_input_layernorm(self, hidden_states):
@@ -604,7 +604,12 @@ class OptimizedLlamaDecoderLayer(LlamaDecoderLayer):  # used in block_utils.py r
                     x.delete()
     
     def init_cache(self, j, k):
+        if not hasattr(self, 'cache_home') or len(self.cache_home) <= j:
+            raise ValueError("Cache home not properly initialized")
+        if not hasattr(self, 'layers') or len(self.layers) <= j:
+            raise ValueError("Layers not properly initialized")
         self.layers[j].init_cache_one_gpu_batch(self.cache_home[j][k])
+        # self.layers[j].init_cache_one_gpu_batch(self.cache_home[j][k])
     
     def load_cache(self, i, j, k, overlap=True):
         # Handle corner cases

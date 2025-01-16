@@ -225,6 +225,8 @@ async def iterate_rpc_inference(
         print_time_now('')
         # A client may pass a tensor with 0 tokens. This is a special case that occurs, e.g.
         # when user wants to pre-allocate cache or check that server *can* allocate that cache.
+        seg_lengths = [hidden_states.shape[0]] 
+
         if hidden_states.numel() > 0:
             assert hidden_states.ndim == 3, f"hidden states must be a single 3d tensor"
             start_compute_time = perf_counter()
@@ -232,13 +234,13 @@ async def iterate_rpc_inference(
             print_time_now('')
             if can_merge_pools:
                 print('-=-=-=-=-=-=-=-==-=- come into can merge pools : ', can_merge_pools)
-                
+
                 inference_infos = tuple(
                     InferenceMetadata(uid, prefix_length, tuple(handles), active_adapter)
                     for uid, handles in zip(requested_uids, cache_handles)
                 )
                 (hidden_states,) = await requested_backends[0].inference_pool.submit_task(
-                    hidden_states, hypo_ids, inference_infos, *prompts, priority=priority
+                    hidden_states, hypo_ids, inference_infos, *prompts, priority=priority, seg_lengths=seg_lengths
                 )
                 
             else:
@@ -253,7 +255,7 @@ async def iterate_rpc_inference(
             print_time_now('')
         # serialize and send last layer outputs
         output_tensors = [
-            serialize_torch_tensor(result.to(proto.dtype), proto.compression, allow_inplace=True)
+            serialize_torch_tensor(result.to(proto.dtype), proto.compression, allow_inplace=True, seg_lengths=seg_lengths)
             for result, proto in zip((hidden_states,), nested_flatten(requested_backends[-1].outputs_schema))
         ]
         print('after serialize and send last layer outputs ', )

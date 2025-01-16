@@ -92,7 +92,7 @@ class PrioritizedTaskPool(threading.Thread):
     def shutdown(self):
         self.submitted_tasks.put(None)  # Shuts down self.run()
 
-    def submit_task(self, *args: Any, priority: float = 0.0) -> MPFuture:
+    def submit_task(self, *args: Any, priority: float = 0.0, seg_lengths: Optional[List[int]] = None) -> MPFuture:
         """ Add task to this pool's queue, return Future for its output.
             主要用于管理任务的提交，确保任务在处理前符合大小限制，并维护任务的优先级。
             通过 MPFuture 对象，调用者可以在任务完成时获取结果或处理异常。
